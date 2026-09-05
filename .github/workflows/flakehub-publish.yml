@@ -1,0 +1,35 @@
+name: flakehub-publish
+
+# Publish this flake to FlakeHub on every push to main (rolling releases).
+# FlakeHub's trusted-platform model publishes ONLY from CI, never a laptop.
+# AUTH is OIDC (id-token: write) — no long-lived FlakeHub token to store/rotate.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: flakehub-publish
+  cancel-in-progress: false
+
+permissions:
+  id-token: write # OIDC — mint the short-lived FlakeHub publish token
+  contents: read
+
+jobs:
+  flakehub-publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      # Upstream Nix with flakes — flakehub-push evaluates the flake metadata.
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - uses: DeterminateSystems/flakehub-push@v6
+        with:
+          name: kattakath/nix-tart-macos
+          visibility: public
+          rolling: true

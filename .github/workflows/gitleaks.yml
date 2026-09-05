@@ -1,0 +1,60 @@
+# gitleaks secret-scanning workflow
+#
+# Gitleaks scans the full git history (and any new commits / PR diffs) for
+# accidentally committed secrets: API keys, tokens, passwords, private keys,
+# and hundreds of other credential patterns. It catches mistakes before they
+# reach production or public forks.
+#
+# Runs on every push to main, every pull request, on a weekly schedule, and
+# on demand via workflow_dispatch. Full history is checked out (fetch-depth: 0)
+# so gitleaks can audit all past commits, not just the latest one.
+
+name: gitleaks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly scan — Sunday 02:00 UTC
+    - cron: "0 2 * * 0"
+  workflow_dispatch:
+
+concurrency:
+  group: gitleaks-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least-privilege: gitleaks only reads the checked-out history. (The old
+# gitleaks-ACTION also needed pull-requests:read to list PR commits over the API;
+# the CLI walks the local git history instead, so that grant is gone.)
+permissions:
+  contents: read
+
+jobs:
+  gitleaks:
+    name: Scan for secrets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history required — gitleaks walks every commit
+          fetch-depth: 0
+
+      # The gitleaks CLI, NOT gitleaks/gitleaks-action.
+      #
+      # The ACTION is free only for personal accounts: against an organization it
+      # hard-fails with "[kattakath] is an organization. License key is required"
+      # and demands a paid GITLEAKS_LICENSE. Moving this repo under the org tripped
+      # exactly that. The gitleaks BINARY is MIT-licensed and unrestricted — only
+      # the wrapper is gated — so run it directly and drop the third-party action
+      # (one less supply-chain edge, and it is pinned by our own flake.lock).
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Run gitleaks
+        # `detect` walks the whole local history (fetch-depth: 0 above);
+        # --redact keeps any finding out of the public CI log.
+        run: nix run nixpkgs#gitleaks -- detect --source . --redact --verbose --exit-code 1

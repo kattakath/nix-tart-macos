@@ -1,0 +1,63 @@
+name: auto-merge
+
+# Arm GitHub's native auto-merge ("merge when ready") on pull requests authored by
+# the operator. With the `merge_queue` rule active on `main`, arming a PR ENQUEUES
+# it: GitHub builds the entry against the projected merged result and merges it
+# once the required `checks` context reports green on that entry. Nothing here
+# bypasses a gate — it only removes the manual click.
+#
+# WHY A MERGE QUEUE AND NOT JUST AUTO-MERGE. Plain auto-merge does not update a
+# stale head branch, so under "require branches to be up to date" a second open PR
+# sits armed forever behind the first. The queue exists for exactly that. (It is
+# also why this repo lives under the `kattakath` ORG: merge queue is rejected
+# outright on user-owned repositories.)
+#
+# WHY AN APP TOKEN, NOT `GITHUB_TOKEN`. Auto-merge attributes the merge to whoever
+# ARMED it, and events produced by the default `GITHUB_TOKEN` never start new
+# workflow runs. Arming with it would land every auto-merged PR on `main`
+# SILENTLY — `flakehub-publish.yml` would simply stop firing. An installation
+# token from the CI bot GitHub App carries no such suppression.
+#
+# Requires, per repo: the CI bot App installed here, plus `vars.CI_BOT_CLIENT_ID`
+# and `secrets.CI_BOT_APP_PRIVATE_KEY`. See kattakath/nix-config →
+# docs/auto-merge-and-merge-queue.md for the fleet-wide picture.
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize]
+
+concurrency:
+  group: auto-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  auto-merge:
+    name: arm auto-merge
+    # The operator's OWN, non-draft PRs only. `github.repository_owner` is NOT
+    # usable: this repo lives under the `kattakath` owner while PRs are authored by
+    # the `ismailkattakath` account. The guard also means a fork PR never reaches
+    # the App-token step, which needs a secret a fork cannot read.
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.user.login == 'ismailkattakath'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.CI_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.CI_BOT_APP_PRIVATE_KEY }}
+
+      # Idempotent — re-arming an already-armed PR is a no-op, which is what makes
+      # the `synchronize` trigger safe: it RE-ARMS a PR the queue ejected (a
+      # conflict, or a failed queue build) as soon as the fix is pushed. Conflicts
+      # are never auto-resolved; this only re-queues once the branch is mergeable.
+      - name: Arm auto-merge
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: gh pr merge --auto --squash "$PR_URL"

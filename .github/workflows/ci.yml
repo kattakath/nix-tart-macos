@@ -1,0 +1,31 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # REQUIRED by the merge queue: a queue entry is built on its own
+  # `gh-readonly-queue/main/...` ref, which emits NEITHER `pull_request` NOR
+  # `push`. Without this trigger the required `checks` context never reports on a
+  # queued entry and every merge times out.
+  merge_group:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: cachix/cachix-action@v17
+        with:
+          name: kattakath
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - name: Formatting
+        run: nix run nixpkgs#nixfmt-rfc-style -- --check $(find . -name '*.nix')
+      - name: Flake outputs well-formed
+        run: nix flake show
+      - name: Build packages + checks (shellcheck the CLIs + instance scripts)
+        run: nix flake check -L
