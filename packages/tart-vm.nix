@@ -84,6 +84,7 @@ writeShellApplication {
       ip         print the guest IP               [--wait SECS]
       ssh        ssh into the guest               [--user U] [--wait SECS] [-- ssh args]
       list       tart list passthrough
+      exists     silent probe: exit 0 if the VM exists, 2 if not (for scripts)
       doctor     exit-coded health checks
       bootstrap  personalize a generic image over SSH:
                  --user LOGIN --fullname "Full Name" --flake github:owner/repo#host
@@ -404,6 +405,13 @@ writeShellApplication {
       exec "$TART" list "''${REST[@]+"''${REST[@]}"}"
     }
 
+    # ---------------------------------------------------------------- exists --
+    # Silent, exit-coded probe for scripts (0 = VM exists, 2 = not): consumers
+    # gate "create first?" flows on it without parsing `tart list` output.
+    cmd_exists() {
+      vm_exists || exit 2
+    }
+
     # ---------------------------------------------------------------- doctor --
     cmd_doctor() {
       local rc=0
@@ -641,6 +649,7 @@ writeShellApplication {
       ip) cmd_ip ;;
       ssh) cmd_ssh ;;
       list) cmd_list ;;
+      exists) cmd_exists ;;
       doctor) cmd_doctor ;;
       bootstrap) cmd_bootstrap ;;
       *) usage; die "unknown subcommand: $sub" ;;
