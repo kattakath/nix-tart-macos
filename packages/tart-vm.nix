@@ -47,6 +47,10 @@ writeShellApplication {
     openssh
     sshpass
     curl
+    # tart must be on PATH for CHILDREN, not just referenced by $TART: packer's
+    # tart plugin shells out to a bare `tart` (measured: bake died in 1.5ms with
+    # 'exec: "tart": executable file not found in $PATH' without this).
+    tart
   ];
   # SC2029: every `ssh host "cmd $var"` below expands client-side ON PURPOSE —
   # the whole point of bootstrap is composing remote commands from local state.
