@@ -30,6 +30,6 @@ jobs:
             experimental-features = nix-command flakes
       - uses: DeterminateSystems/flakehub-push@v6
         with:
-          name: kattakath/nix-tart-macos
+          name: kattakath/nix-tart-vms
           visibility: public
           rolling: true

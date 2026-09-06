@@ -2,7 +2,7 @@
 
 ## The model (important)
 
-`nix-tart-macos` provisions local VMs; its security posture is about **what
+`nix-tart-vms` provisions local VMs; its security posture is about **what
 gets trusted, pinned, and printed**:
 
 - **No secret in the Nix store, git, or an image.** Images are

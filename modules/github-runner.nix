@@ -1,8 +1,10 @@
-# tart.runners.<name> — N ephemeral GitHub Actions runner controllers on one
-# host, each an isolated Tart-VM-per-job loop (see packages/tart-runner.nix
+# tart.githubRunners.<name> — N ephemeral GitHub Actions runner controllers on
+# one host, each an isolated Tart-VM-per-job loop (see packages/tart-runner.nix
 # for the engine + provenance). Instances share the hard Apple Virtualization
-# budget of TWO concurrent macOS guests via the slot semaphore; the module
-# asserts the configured ceiling never exceeds it.
+# budget of TWO concurrent macOS guests via the slot semaphore (options in
+# modules/slots.nix, shared with the GitLab lane); the module asserts the
+# configured ceiling never exceeds it. `tart.runners` is a renamed-option
+# alias from before the GitLab lane made the name ambiguous.
 #
 # Secret delivery is the CONSUMER's job: `privateKeyPath` points at a file the
 # host materializes (agenix, manual install, …) — no key material transits Nix.
@@ -98,7 +100,7 @@ let
     }
   );
 
-  enabled = lib.filterAttrs (_: r: r.enable) cfg.runners;
+  enabled = lib.filterAttrs (_: r: r.enable) cfg.githubRunners;
 
   # One base image + host-key pin per DISTINCT image (instances share them).
   imageKey = r: builtins.hashString "sha256" "${r.image.oci}@${r.image.digest}";
@@ -130,21 +132,16 @@ let
     lib.concatStringsSep "\n" (lib.mapAttrsToList (k: v: "export ${k}=${lib.escapeShellArg v}") env);
 in
 {
+  imports = [
+    ./slots.nix
+    (lib.mkRenamedOptionModule [ "tart" "runners" ] [ "tart" "githubRunners" ])
+  ];
+
   options.tart = {
-    runners = lib.mkOption {
+    githubRunners = lib.mkOption {
       type = lib.types.attrsOf runnerType;
       default = { };
       description = "Ephemeral Tart-VM GitHub Actions runner instances.";
-    };
-    runnerSlots = lib.mkOption {
-      type = lib.types.ints.positive;
-      default = 2;
-      description = "Host-wide concurrent-VM ceiling shared by ALL instances.";
-    };
-    runnerStateDir = lib.mkOption {
-      type = lib.types.str;
-      default = "/tmp/tart-runner";
-      description = "Slots + host-key pins. /tmp survives the GUI session fine; pins regenerate via setup.";
     };
   };
 
