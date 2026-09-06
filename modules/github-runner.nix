@@ -6,6 +6,11 @@
 # configured ceiling never exceeds it. `tart.runners` is a renamed-option
 # alias from before the GitLab lane made the name ambiguous.
 #
+# The wait for work is HOST-SIDE (a REST poll every `pollIntervalSeconds`), so
+# an idle lane holds no guest and no slot — the same shape the GitLab lane has
+# always had, where gitlab-runner listens on the host and the guest exists only
+# for the duration of a job.
+#
 # Secret delivery is the CONSUMER's job: `privateKeyPath` points at a file the
 # host materializes (agenix, manual install, …) — no key material transits Nix.
 # LaunchAgents run in the GUI login user's session — a Virtualization.framework
@@ -64,11 +69,17 @@ let
         };
         # LABEL VOCABULARY — capability, not identity.
         #
-        # `--no-default-labels` is passed (packages/tart-runner.nix), so GitHub
-        # adds NOTHING server-side: this list is the runner's entire label set,
-        # and the first three re-declare what GitHub would otherwise have
-        # assigned on its own ({self-hosted, macOS, ARM64} — matching is
-        # case-insensitive, so `arm64` here answers a job asking for `ARM64`).
+        # Registration is a JIT config, and the generate-jitconfig endpoint
+        # adds NOTHING server-side (unlike config.sh, which appends
+        # {self-hosted, OSX, Arm64} unless told not to): this list is the
+        # runner's entire label set, verbatim. The first three therefore
+        # re-declare what config.sh would have added on its own
+        # ({self-hosted, macOS, ARM64} — matching is case-insensitive, so
+        # `arm64` here answers a job asking for `ARM64`), and dropping
+        # `self-hosted` would silently make every `runs-on: self-hosted` job
+        # unmatchable. The same list is what the host-side poll
+        # (`tart-runner-poll`) tests a queued job's `runs-on:` against, so the
+        # dispatcher and the registration can never disagree.
         #
         # `tart` is the toolchain discriminator: a job that lands here runs in a
         # stock Cirrus guest, NOT on the host, so it sees no nix, no cachix and
@@ -104,15 +115,52 @@ let
             name
           ];
           description = ''
-            The runner's COMPLETE label set — registered with
-            `--no-default-labels`, so nothing is added server-side. Carries the
-            fleet's canonical vocabulary ({self-hosted, macOS, arm64} + the
-            `tart` toolchain discriminator) plus the instance name.
+            The runner's COMPLETE label set — the JIT registration adds
+            nothing server-side. Carries the fleet's canonical vocabulary
+            ({self-hosted, macOS, arm64} + the `tart` toolchain discriminator)
+            plus the instance name.
           '';
         };
         runnerGroup = lib.mkOption {
           type = lib.types.str;
           default = "Default";
+          description = ''
+            Runner-group NAME. generate-jitconfig wants a numeric
+            `runner_group_id`, which is account-specific, so the controller
+            resolves this name at mint time (org scope) and falls back to the
+            built-in Default group.
+          '';
+        };
+        # HOST-SIDE DISPATCH: how often this lane asks GitHub whether any
+        # queued job matches its labels. Nothing is booted between polls — see
+        # the TR_POLL_INTERVAL comment in packages/tart-runner.nix for the
+        # memory-vs-latency trade this default encodes (~8 GB and a guest slot
+        # freed per idle lane, at ~1-4 min before a queued job starts).
+        pollIntervalSeconds = lib.mkOption {
+          type = lib.types.ints.positive;
+          default = 60;
+          description = ''
+            Seconds between host-side queued-work polls. Idle cost is roughly
+            two REST requests per watched repo per interval; at 60s and ten
+            repos that is ~1200 requests/hour against a GitHub App
+            installation limit of at least 5000/hour.
+          '';
+        };
+        # An org lane polls every repo the App installation can reach. That is
+        # self-maintaining (a repo added to the installation is watched with no
+        # rebuild) and correct, but its cost scales with the installation. This
+        # is the narrowing knob for a large one — the rate-limit lever that is
+        # not "poll less often".
+        watchRepos = lib.mkOption {
+          type = lib.types.listOf lib.types.str;
+          default = [ ];
+          example = [ "myorg/ci-heavy" ];
+          description = ''
+            Restrict the org-scope queued-work poll to these `owner/repo`
+            names. Empty (the default) polls every repository the App
+            installation can access. Ignored for repo scope, which has exactly
+            one repository by construction.
+          '';
         };
         image = lib.mkOption {
           type = lib.types.submodule {
@@ -192,6 +240,8 @@ let
     TR_SLOTS_DIR = "${cfg.runnerStateDir}/slots";
     TR_SLOTS_MAX = toString cfg.runnerSlots;
     TR_RUNNER_DIR = r.runnerDirInGuest;
+    TR_POLL_INTERVAL = toString r.pollIntervalSeconds;
+    TR_WATCH_REPOS = lib.concatStringsSep " " r.watchRepos;
   };
 
   envExports =

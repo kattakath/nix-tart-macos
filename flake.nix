@@ -351,6 +351,8 @@
                   ];
                   controller = (pkgs.callPackage ./packages/tart-runner.nix { }).controller;
                   setup = (pkgs.callPackage ./packages/tart-runner.nix { }).setup;
+                  ghApi = (pkgs.callPackage ./packages/tart-runner.nix { }).api;
+                  ghPoll = (pkgs.callPackage ./packages/tart-runner.nix { }).poll;
                   assertionsOk = if lib.all (a: a.assertion) eval.config.assertions then "1" else "0";
                 }
                 ''
@@ -411,6 +413,64 @@
                     if grep -Eq "TR_SETUP_OWNER='?1'?$" "$w"; then owners=$((owners + 1)); fi
                   done
                   [ "$owners" = 1 ] || fail "expected exactly 1 re-pin owner for one shared image, got $owners"
+
+                  # (i) THE 2026-09-06 invariant: the controller must NOT wait
+                  # for work inside a pre-booted guest. Before this, every lane
+                  # cloned an 8 GB guest and ran `./run.sh` in it, so an idle
+                  # lane held one of Apple's two guest slots indefinitely. The
+                  # comments above say so; these greps are what actually stops
+                  # a future edit from putting the long poll back in the guest.
+                  apiBin="$ghApi/bin/tart-runner-api"
+                  pollBin="$ghPoll/bin/tart-runner-poll"
+                  test -x "$pollBin" || fail "no host-side queued-work poller is built"
+
+                  # Invocation forms, not the bare words — the controller's own
+                  # comments name both scripts to explain why they are gone.
+                  if grep -q '\./config\.sh' "$ctl"; then
+                    fail "controller still registers the runner with config.sh inside the guest"
+                  fi
+                  if grep -q '\./run\.sh' "$ctl"; then
+                    fail "controller still drives the guest through run.sh (a restart loop, not a one-shot)"
+                  fi
+                  if grep -q 'registration-token' "$apiBin"; then
+                    fail "the API helper still mints legacy runner registration tokens"
+                  fi
+                  grep -q 'generate-jitconfig' "$apiBin" \
+                    || fail "the API helper no longer mints a JIT config"
+                  grep -q 'ACTIONS_RUNNER_INPUT_JITCONFIG' "$ctl" \
+                    || fail "controller no longer hands the guest a JIT config on stdin"
+                  # The `run` subcommand is mandatory: without it Runner.Listener
+                  # writes its config, prints usage and exits 0 — a supervisor
+                  # reading exit 0 as success would spin launching no-op runners.
+                  grep -q 'Runner\.Listener run' "$ctl" \
+                    || fail "controller does not invoke Runner.Listener with the mandatory 'run' subcommand"
+                  # Bearer tokens must reach curl through --config on stdin, never -H (argv is world-readable via ps).
+                  if grep -q 'Authorization: Bearer' "$apiBin"; then
+                    fail "the API helper puts a bearer token on a curl command line"
+                  fi
+
+                  # A guest is booted ONLY on the poll saying there is work.
+                  grep -q 'tart-runner-poll' "$ctl" \
+                    || fail "controller has no host-side queued-work poll"
+                  grep -Eq '^[[:space:]]*0\) run_one_job ;;' "$ctl" \
+                    || fail "run_one_job is no longer gated on the queued-work poll result"
+                  if grep -Eq '^[[:space:]]*run_one_job[[:space:]]*$' "$ctl"; then
+                    fail "run_one_job is still called unconditionally — an idle lane would boot a guest"
+                  fi
+                  # And a runner is created at the forge only AFTER a slot is
+                  # held: minting first would leave a registered runner behind
+                  # on a slot-wait timeout, and GitHub would dispatch to it.
+                  slotLine=$(grep -n 'if ! slot_acquire_pid; then' "$ctl" | head -n1 | cut -d: -f1)
+                  jitLine=$(grep -n 'tart-runner-api jitconfig' "$ctl" | head -n1 | cut -d: -f1)
+                  [ -n "$slotLine" ] && [ -n "$jitLine" ] \
+                    || fail "cannot locate the slot acquire / JIT mint pair in the controller"
+                  [ "$slotLine" -lt "$jitLine" ] \
+                    || fail "the JIT config is minted before the guest slot is held"
+
+                  # (j) the poll interval reaches the lane wrapper — a default
+                  # baked only into the controller would silently ignore the option.
+                  grep -Eq "TR_POLL_INTERVAL='?[0-9]+'?$" "$alphaArg0" \
+                    || fail "lane wrapper does not carry a poll interval"
 
                   touch "$out"
                 '';

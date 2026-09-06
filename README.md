@@ -269,12 +269,55 @@ tart.githubRunners.myorg = {
 };
 ```
 
-The LaunchAgent loops forever: mint a 1-hour token → clone → boot headless →
-run **one** `--ephemeral` job over pinned SSH → delete the VM. Runner names
-are `<instance>-<uuid>` (never `--replace`), orphan reapers are scoped per
-instance, and controllers must run in a **GUI login session** (a
-Virtualization.framework keychain requirement — there is deliberately no
-daemon mode).
+**The wait for work happens on the host, not in a guest.** The LaunchAgent
+loops forever, and the loop is cheap:
+
+```
+job queued at GitHub (free, up to 24h)
+  → host-side REST poll sees a queued job whose runs-on: this lane satisfies
+  → bounded slot acquire (on timeout: mint nothing, leave it queued)
+  → JIT config minted — this is what creates the runner at the forge
+  → clone → boot headless → ONE job over pinned SSH → delete the VM
+```
+
+Nothing is booted between polls, so an **idle lane costs no guest, no slot and
+no RAM** — the same shape the GitLab lane below always had. The price is
+first-job latency: up to one `pollIntervalSeconds` (default 60s) to notice the
+job, then ~1–3 min for clone + boot. That is the right trade for a handful of
+jobs a day on a laptop where 8 GB per idle lane and one of only **two** guest
+slots are the scarce things; it would be the wrong trade for a
+latency-critical or continuously-busy lane, where the guest is never idle
+anyway — lower the interval there, or keep a warm runner.
+
+Idle cost is ~2 REST requests per watched repo per interval (queued +
+in_progress run listings; a listing of a run's jobs only when one exists).
+Org-scope lanes watch every repo the App installation can reach; narrow that
+with `watchRepos` if a big installation approaches the App's ≥5000 req/hour
+limit. A push channel was considered and declined: `gh webhook forward` is
+documented as a webhook *testing* aid, needs a personal `gh` session rather
+than this lane's App installation, and a real webhook receiver (ingress,
+public URL or tunnel, shared secret, HTTP server, its own supervision) is
+bigger than the problem — the same "watch the queue depth" poll shape
+actions-runner-controller used before webhooks.
+
+Registration is a **JIT config**
+(`POST …/actions/runners/generate-jitconfig`), not a registration token +
+`config.sh`: the controller hands the blob to `Runner.Listener run` over ssh
+**stdin**, so no registration token exists and no credential outlives the
+guest. (JIT does *not* mean an empty guest disk — the blob decodes to
+`.runner`/`.credentials` at run time, in a VM deleted minutes later.) The
+`run` subcommand is mandatory; without it the runner writes its config, prints
+usage and exits 0. A JIT registration is forced ephemeral and
+update-disabled server-side, so no `--ephemeral`/`--disableupdate` flag is
+passed, and the image's runner version is never silently self-updated.
+
+A guest that never receives a job — a sibling lane won the race, or the job
+was cancelled — is torn down after `TR_JOB_GRACE` (300s) instead of sitting at
+"Listening for Jobs" holding a slot, and its registration is deleted rather
+than left as a phantom offline runner. Runner names are `<instance>-<uuid>`
+(never `--replace`), orphan reapers are scoped per instance, and controllers
+must run in a **GUI login session** (a Virtualization.framework keychain
+requirement — there is deliberately no daemon mode).
 
 **On images and pins.** The local base clone *and* the SSH host-key pin are
 content-keyed by `sha256(oci@digest)`, so **bumping the digest renames both** —
