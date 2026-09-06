@@ -282,7 +282,9 @@ by design (a new image genuinely has a new host key, and a fixed pin path would
 let a stale pin authenticate a new guest). It is therefore not a one-time
 setup: on a bump, one elected instance per distinct image re-creates them by
 itself on its next cycle — pulling with **no** VM slot held (a first pull is
-tens of GB), then taking a slot for the single throwaway pin boot. Watch
+**hundreds** of GB: `macos-runner:tahoe` measured 222 GB on 2026-09-06, and
+needed ~138 GB of free space while staging), then taking a slot for the single
+throwaway pin boot. Watch
 `<runnerStateDir>/<owning-instance>.log`; the other instances on that image
 just log that they are waiting. `tart-runner-setup-<name> [image|pin|all]`
 still exists to pre-warm a bump or to debug one by hand. Superseded

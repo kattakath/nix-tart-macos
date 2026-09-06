@@ -129,9 +129,10 @@ let
   isSetupOwner = name: setupOwners.${imageKey enabled.${name}} == name;
 
   # Every base image still wanted on this host — the owner GCs any other
-  # tr-base-* (a bump would otherwise strand tens of GB per superseded image,
-  # and the operator's natural remedy, deleting a base by hand, is exactly
-  # what leaves a pin with no base behind it).
+  # tr-base-* (a bump would otherwise strand a whole superseded image — 222 GB
+  # for macos-runner:tahoe, measured 2026-09-06 — and the operator's natural
+  # remedy, deleting a base by hand, is exactly what leaves a pin with no base
+  # behind it).
   liveBases = lib.concatStringsSep " " (lib.unique (lib.mapAttrsToList (_: baseNameFor) enabled));
 
   mkEnv = name: r: {
