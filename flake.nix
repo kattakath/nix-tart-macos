@@ -24,13 +24,17 @@
         # nix-darwin module for the HOST Mac: declarative tart.vms.<name>
         # (cpu/memory/headless/dirs/autoStart via launchd). Import it from a
         # consumer flake's darwinConfigurations modules list.
-        darwinModules.default = import ./modules/darwin.nix;
-        darwinModules.tart = import ./modules/darwin.nix;
+        # Exported as PATHS (not `import`ed functions): the module system
+        # dedupes modules by path identity, and gitlab-runner.nix `imports`
+        # tart-runner.nix — a consumer listing both must not get a duplicate
+        # `tart.runners` option declaration.
+        darwinModules.default = ./modules/darwin.nix;
+        darwinModules.tart = ./modules/darwin.nix;
         # Ephemeral GitHub Actions runners in disposable VMs (tart.runners.*).
-        darwinModules.runner = import ./modules/tart-runner.nix;
+        darwinModules.runner = ./modules/tart-runner.nix;
         # Declarative gitlab-runner wired to the Tart custom executor
         # (tart.gitlabRunner.*); token stays a runtime file, never in-store.
-        darwinModules.gitlab-runner = import ./modules/gitlab-runner.nix;
+        darwinModules.gitlab-runner = ./modules/gitlab-runner.nix;
       };
 
       perSystem =
