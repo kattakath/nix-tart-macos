@@ -20,6 +20,7 @@
 {
   lib,
   writeShellApplication,
+  writeText,
   coreutils,
   gnugrep,
   gnused,
@@ -32,6 +33,9 @@
 }:
 let
   tartBin = lib.getExe tart;
+  # The host-wide slot semaphore — SHARED with the GitLab executor shims
+  # (packages/gitlab-tart.nix); packages/tart-slots.nix is the one protocol.
+  slotsLib = import ./tart-slots.nix { inherit writeText; };
 
   # Env contract (set by the darwin module's per-instance wrapper):
   #   TR_NAME TR_SCOPE_TYPE(org|repo) TR_SCOPE TR_APP_ID TR_INSTALLATION_ID
@@ -110,30 +114,11 @@ let
 
       log() { echo "[$(date -u +%FT%TZ)] [$TR_NAME] $*" >&2; }
 
-      # --- slot semaphore: atomic mkdir per slot; reclaim slots whose owner
-      # PID is dead (crashed controller). Blocks until a slot frees up —
-      # GitHub simply queues jobs while no runner is registered.
-      acquire_slot() {
-        while :; do
-          local i
-          for i in $(seq 1 "$TR_SLOTS_MAX"); do
-            local d="$TR_SLOTS_DIR/slot-$i"
-            if mkdir "$d" 2>/dev/null; then
-              echo "$$" > "$d/pid"
-              SLOT_DIR="$d"
-              return 0
-            fi
-            local owner
-            owner=$(cat "$d/pid" 2>/dev/null || true)
-            if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
-              log "reclaiming stale slot $i (dead pid $owner)"
-              rm -rf "$d"
-            fi
-          done
-          sleep 10
-        done
-      }
-      release_slot() { [ -n "''${SLOT_DIR:-}" ] && rm -rf "$SLOT_DIR"; SLOT_DIR=""; }
+      # --- slot semaphore: the shared library (tart-slots.sh) — one protocol
+      # with the GitLab shims. Blocks until a slot frees; GitHub simply queues
+      # jobs while no runner is registered.
+      # shellcheck disable=SC1091
+      source ${slotsLib}
 
       # --- reaper: ONLY this instance's prefix — never siblings'.
       reap_own_orphans() {
@@ -156,7 +141,7 @@ let
             wait "$run_pid" 2>/dev/null || true
           fi
           "$TART" delete "$vm" >/dev/null 2>&1 || log "WARNING: delete $vm failed — possible leaked clone"
-          release_slot
+          slot_release
         }
         trap cleanup RETURN
 
@@ -166,7 +151,7 @@ let
           return 1
         fi
 
-        acquire_slot
+        slot_acquire_pid
         log "slot acquired; minting registration token"
         local token
         token=$(tart-runner-mint) || { log "mint failed"; sleep 30; return 1; }

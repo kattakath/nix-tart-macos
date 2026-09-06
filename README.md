@@ -275,6 +275,31 @@ bones from [a1678991/github-tart-runner](https://github.com/a1678991/github-tart
 (MIT, notice preserved in `packages/tart-runner.nix`); the multi-instance
 fixes are this repo's.
 
+## GitLab CI on the same VM budget (`gitlab-tart`)
+
+The GitLab half needs no custom controller — cirruslabs'
+[gitlab-tart-executor](https://github.com/cirruslabs/gitlab-tart-executor)
+already runs each GitLab CI job in an ephemeral Tart VM via gitlab-runner's
+custom-executor interface. This flake packages its release binary (nixpkgs
+carries it nowhere) and adds **slot shims** so its VMs share the host's
+two-macOS-guest budget with the `tart.runners.*` GitHub controllers —
+`packages/tart-slots.nix` is the single semaphore protocol both speak
+(GitHub slots are pid-owned; GitLab slots are keyed by the executor's
+deterministic `gitlab-<CI_JOB_ID>` VM name, since its prepare process exits
+while the VM lives on).
+
+```sh
+nix run github:kattakath/nix-tart-macos#... tart-gitlab-print-config
+# paste the printed [runners.custom] stanza into ~/.gitlab-runner/config.toml
+# (the config.toml — and its glrt-… runner token — stays imperative on purpose)
+```
+
+gitlab-runner **always** runs the cleanup stage, even after a failed prepare,
+so slots cannot leak past a job; a hard crash is covered by stale-slot
+reclaim (`tart list` no longer shows the marker VM). macOS 15+ note: the
+"Local Network" privacy gate can stall guest SSH — see upstream's README for
+the privileged `localnetworkhelper` or the RFC1918 pre-allow.
+
 ## License
 
 MIT © Ismail Kattakath — except

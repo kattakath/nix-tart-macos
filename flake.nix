@@ -37,6 +37,10 @@
             packer-plugin-tart = pkgs.callPackage ./packages/packer-plugin-tart.nix { };
             tart-guest-agent = pkgs.callPackage ./packages/tart-guest-agent.nix { };
             tart-vm = pkgs.callPackage ./packages/tart-vm.nix { inherit packer-plugin-tart; };
+            # GitLab: cirruslabs' executor + the slot-shim config printer
+            # (the stanza it prints embeds the shim store paths).
+            gitlab-tart-executor = (pkgs.callPackage ./packages/gitlab-tart.nix { }).executor;
+            tart-gitlab-print-config = (pkgs.callPackage ./packages/gitlab-tart.nix { }).printConfig;
             default = tart-vm;
           };
         in
@@ -137,6 +141,11 @@
                 '';
 
             tart-runner = (pkgs.callPackage ./packages/tart-runner.nix { }).controller;
+
+            # GitLab side: executor package + the slot shims (building
+            # printConfig pulls executor + all four shims transitively, so
+            # shellcheck gates every shim and the fetchurl hash is exercised).
+            gitlab-tart = (pkgs.callPackage ./packages/gitlab-tart.nix { }).printConfig;
 
             runner-module =
               let
