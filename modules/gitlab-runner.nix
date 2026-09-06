@@ -41,10 +41,20 @@ let
       export TR_SLOTS_DIR=${lib.escapeShellArg "${tartCfg.runnerStateDir}/slots"}
       export TR_SLOTS_MAX=${toString tartCfg.runnerSlots}
 
-      # No wait loop here — launchd gates the whole agent on the token file's
-      # existence (KeepAlive.PathState below), so by the time this runs the
-      # file is there; a missing/unreadable one is a hard exit, not a spin.
-      token="$(tr -d '[:space:]' < ${lib.escapeShellArg cfg.tokenFile})"
+      # EXISTENCE is already handled by launchd (KeepAlive.PathState below), so
+      # there is no wait-for-the-file loop here. CONTENT is not something
+      # PathState can see: an EMPTY /run/agenix secret satisfies it and then
+      # yields a launchd-healthy agent that logs "Runner token is empty or
+      # whitespace; this runner will be skipped during job polling" once and
+      # then polls nothing, forever. So fail CLOSED on empty.
+      token=""
+      until [ -n "$token" ]; do
+        token="$(tr -d '[:space:]' < ${lib.escapeShellArg cfg.tokenFile} 2>/dev/null || true)"
+        if [ -z "$token" ]; then
+          echo "nix-gitlab-runner: waiting for a NON-EMPTY token in ${cfg.tokenFile}" >&2
+          sleep 5
+        fi
+      done
 
       confDir="''${HOME}/.config/nix-gitlab-runner"
       mkdir -p "$confDir"
@@ -113,10 +123,23 @@ in
     # CLI on PATH for verify/status against the SAME rendered config.
     environment.systemPackages = [ cfg.package ];
 
+    # Same durable-state mkdir as the GitHub lane, declared here too because
+    # neither module may read the other's options (this one never declares
+    # tart.githubRunners). `mkdir -p` is idempotent and preActivation.text is
+    # a lines option, so both declaring it merges cleanly. preActivation, not
+    # postActivation: nix-darwin runs userLaunchd — which loads this agent and
+    # opens StandardOutPath below — between the two.
+    system.activationScripts.preActivation.text = lib.mkAfter ''
+      sudo --user=${config.system.primaryUser} -- /bin/mkdir -p ${lib.escapeShellArg tartCfg.runnerStateDir}
+    '';
+
     launchd.user.agents.gitlab-runner = {
       serviceConfig = {
         ProgramArguments = [ "${runner}/bin/nix-gitlab-runner" ];
         RunAtLoad = true;
+        # TWO GATES, because they catch different failures and neither covers
+        # the other.
+        #
         # Waiting for the runtime token file is launchd's job, not a shell
         # poll's: upstream option
         # nix-darwin.launchd.user.agents.<name>.serviceConfig.KeepAlive.PathState
@@ -127,6 +150,12 @@ in
         # the token the agent simply stays down; the moment it lands launchd
         # starts us. Restart-on-crash is unchanged — the path outlives any one
         # `gitlab-runner run`.
+        #
+        # CONTENT is not something PathState can see: an EMPTY /run/agenix
+        # secret satisfies PathState and then yields a launchd-healthy agent
+        # that logs "Runner token is empty or whitespace; this runner will be
+        # skipped during job polling" once and polls nothing, forever. That is
+        # why the non-empty wait in `runner` above exists alongside this.
         KeepAlive.PathState = {
           "${cfg.tokenFile}" = true;
         };

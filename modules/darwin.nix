@@ -87,6 +87,11 @@ let
             (tart-vm-<name>.log). Point it at ~/Library/Logs in practice;
             the default stays $HOME-free so the module evaluates without
             knowing the operator's home.
+
+            Consequence of that default: macOS purges /tmp, so the log of the
+            run you want to debug may already be gone. Set this for any VM you
+            intend to diagnose. (The CI lanes' own state has no such excuse —
+            tart.runnerStateDir is durable by default, see modules/slots.nix.)
           '';
         };
 

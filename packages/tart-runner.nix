@@ -41,7 +41,8 @@ let
   #   TR_NAME TR_SCOPE_TYPE(org|repo) TR_SCOPE TR_APP_ID TR_INSTALLATION_ID
   #   TR_KEY_PATH TR_LABELS TR_RUNNER_GROUP TR_BASE_IMAGE TR_OCI_IMAGE
   #   TR_OCI_DIGEST TR_CPU TR_MEMORY_MB TR_VM_USER TR_VM_PASS TR_KNOWN_HOSTS
-  #   TR_SLOTS_DIR TR_SLOTS_MAX TR_RUNNER_DIR TR_BOOT_TIMEOUT
+  #   TR_SETUP_OWNER TR_LIVE_BASES TR_SLOTS_DIR TR_SLOTS_MAX TR_RUNNER_DIR
+  #   TR_BOOT_TIMEOUT TR_PULL_TIMEOUT
   mint = writeShellApplication {
     name = "tart-runner-mint";
     runtimeInputs = [
@@ -94,6 +95,10 @@ let
       openssh
       sshpass
       mint
+      # The controller SELF-HEALS a missing base image / host-key pin by
+      # running the same idempotent engine the operator would (see
+      # ensure_image below), so `setup` must be on its PATH.
+      setup
     ];
     # Deliberately NOT errexit for the loop body (one bad iteration must not
     # kill the agent); pipefail+nounset stay.
@@ -111,6 +116,10 @@ let
       TR_RUNNER_GROUP="''${TR_RUNNER_GROUP:-Default}"
       TR_RUNNER_DIR="''${TR_RUNNER_DIR:-/Users/admin/actions-runner}"
       TR_BOOT_TIMEOUT="''${TR_BOOT_TIMEOUT:-180}"
+      # A first pull of a Cirrus macOS runner image is tens of GB — hours on a
+      # home link, not the ~180s a pin boot costs. Bounded so a wedged pull
+      # cannot hold the loop forever.
+      TR_PULL_TIMEOUT="''${TR_PULL_TIMEOUT:-14400}"
 
       log() { echo "[$(date -u +%FT%TZ)] [$TR_NAME] $*" >&2; }
 
@@ -120,36 +129,125 @@ let
       # shellcheck disable=SC1091
       source ${slotsLib}
 
-      # --- reaper: ONLY this instance's prefix — never siblings'.
+      # --- reaper: ONLY this instance's prefixes — never siblings'. pin-tmp-*
+      # is in scope because the pin boot now runs from this KeepAlive
+      # controller (ensure_image), so a restart mid-pin can strand a RUNNING
+      # throwaway guest that carries no slot marker — invisible to
+      # _slot_stale, and permanently one of Apple's two guests.
       reap_own_orphans() {
         local vm
-        for vm in $("$TART" list --quiet 2>/dev/null | grep "^run-$TR_NAME-" || true); do
+        for vm in $("$TART" list --quiet 2>/dev/null | grep -e "^run-$TR_NAME-" -e "^pin-tmp-$TR_NAME-" || true); do
           log "reaping orphan $vm"
           "$TART" stop "$vm" >/dev/null 2>&1 || true
           "$TART" delete "$vm" >/dev/null 2>&1 || true
         done
       }
 
+      # --- GC: a digest bump renames the base clone (both it and the pin are
+      # keyed by sha256(oci@digest)), so superseded tr-base-* would accumulate
+      # at tens of GB each. TR_LIVE_BASES is the set EVERY enabled instance on
+      # this host still needs, computed in modules/github-runner.nix, so this
+      # can never delete a sibling's base.
+      #
+      # ORDERING IS LOAD-BEARING: this runs ONLY from mark_ready(), i.e. only
+      # once the CURRENT base and pin are both confirmed present — never at
+      # startup. Deleting first and pulling second means a well-formed but
+      # WRONG digest (a typo, or a tag deleted upstream) strands the host with
+      # no base at all, and reverting hosts/macos.nix then costs a multi-hour,
+      # tens-of-GB re-pull. Delete-after-successful-pull has no such hole.
+      gc_superseded_bases() {
+        local vm
+        for vm in $("$TART" list --quiet 2>/dev/null | grep '^tr-base-' || true); do
+          case " ''${TR_LIVE_BASES:-} " in *" $vm "*) continue ;; esac
+          log "deleting superseded base image $vm"
+          "$TART" delete "$vm" >/dev/null 2>&1 || log "WARNING: delete $vm failed"
+        done
+      }
+
+      # --- pre-flight: a digest bump renames BOTH the base clone AND the pin,
+      # so BOTH must be checked. 2026-09-05: only the pin was checked, and
+      # from INSIDE the job function below the trap armed at its top — so a
+      # missing pin logged "possible leaked clone" for a VM that was never
+      # cloned, every ~60s, for a day, with 0 runners registered. Gating the
+      # pin alone would merely move that loop downstream to `tart clone`.
+      # Fail-closed throughout: never falls back to StrictHostKeyChecking=no.
+      base_present() { "$TART" list --quiet 2>/dev/null | grep -qx "$TR_BASE_IMAGE"; }
+      pin_present() { [ -s "$TR_KNOWN_HOSTS" ]; }
+
+      heal_fails=0
+      heal_wait=30
+      gc_done=0
+      # Single success path, so GC can never be reached with the current base
+      # missing. Idempotent-once: TR_LIVE_BASES is fixed for this process, so a
+      # second sweep would always be a no-op.
+      mark_ready() {
+        heal_fails=0
+        heal_wait=30
+        if [ "''${TR_SETUP_OWNER:-0}" = "1" ] && [ "$gc_done" = "0" ]; then
+          gc_superseded_bases
+          gc_done=1
+        fi
+      }
+      ensure_image() {
+        if base_present && pin_present; then
+          mark_ready
+          return 0
+        fi
+        if [ "''${TR_SETUP_OWNER:-0}" != "1" ]; then
+          log "base/pin for $TR_OCI_DIGEST not ready — the owning lane for this image re-creates them; retry in ''${heal_wait}s"
+        else
+          if ! base_present; then
+            log "base image $TR_BASE_IMAGE absent (digest $TR_OCI_DIGEST) — pulling; NO slot held, this can take hours on a first pull"
+            timeout "$TR_PULL_TIMEOUT" tart-runner-setup image || log "image pull FAILED ($TR_OCI_IMAGE@$TR_OCI_DIGEST)"
+          fi
+          if base_present && ! pin_present; then
+            # The pin boots a throwaway guest, so it must respect Apple's
+            # host-wide 2-guest cap — the pull must not.
+            log "host-key pin $TR_KNOWN_HOSTS absent — re-pinning in a slot (one guest boot, <=''${TR_BOOT_TIMEOUT}s)"
+            slot_acquire_pid
+            tart-runner-setup pin || log "re-pin FAILED ($TR_OCI_IMAGE@$TR_OCI_DIGEST)"
+            slot_release
+          fi
+          if base_present && pin_present; then
+            mark_ready
+            return 0
+          fi
+        fi
+        heal_fails=$((heal_fails + 1))
+        if [ "$heal_fails" -ge 5 ]; then
+          log "ESCALATION: $heal_fails consecutive failures preparing $TR_OCI_IMAGE@$TR_OCI_DIGEST (base=$TR_BASE_IMAGE pin=$TR_KNOWN_HOSTS); 0 runners registered for $TR_SCOPE — try tart-runner-setup-$TR_NAME by hand"
+        fi
+        sleep "$heal_wait"
+        # Exponential backoff, capped: a genuinely broken digest must not
+        # re-attempt a multi-GB pull every 30s forever.
+        heal_wait=$((heal_wait * 2))
+        [ "$heal_wait" -le 900 ] || heal_wait=900
+        return 1
+      }
+
       run_one_job() {
-        local vm uuid run_pid="" rc=0
+        local vm uuid run_pid="" rc=0 cloned=0
         uuid=$(uuidgen | tr '[:upper:]' '[:lower:]')
         vm="run-$TR_NAME-$uuid"
+        # Tear down only what was actually created. The RETURN trap fires on
+        # EVERY early return (mint failure, empty token), and an unconditional
+        # `tart delete` on a never-cloned VM emits a bogus "possible leaked
+        # clone" — the red herring that sat next to the real 2026-09-05 cause
+        # in the log.
         cleanup() {
-          "$TART" stop "$vm" >/dev/null 2>&1 || true
+          if [ "$cloned" = 1 ]; then
+            "$TART" stop "$vm" >/dev/null 2>&1 || true
+          fi
           if [ -n "$run_pid" ]; then
             kill "$run_pid" >/dev/null 2>&1 || true
             wait "$run_pid" 2>/dev/null || true
           fi
-          "$TART" delete "$vm" >/dev/null 2>&1 || log "WARNING: delete $vm failed — possible leaked clone"
+          if [ "$cloned" = 1 ]; then
+            "$TART" delete "$vm" >/dev/null 2>&1 || log "WARNING: delete $vm failed — possible leaked clone"
+          fi
           slot_release
         }
         trap cleanup RETURN
-
-        if [ ! -s "$TR_KNOWN_HOSTS" ]; then
-          log "pinned host key missing ($TR_KNOWN_HOSTS) — run tart-runner-setup; refusing"
-          sleep 60
-          return 1
-        fi
 
         slot_acquire_pid
         log "slot acquired; minting registration token"
@@ -159,6 +257,7 @@ let
 
         log "clone $TR_BASE_IMAGE -> $vm"
         "$TART" clone "$TR_BASE_IMAGE" "$vm" || return 1
+        cloned=1
         "$TART" set "$vm" --cpu "$TR_CPU" --memory "$TR_MEMORY_MB" || return 1
         "$TART" run --no-graphics "$vm" >/dev/null 2>&1 &
         run_pid=$!
@@ -206,8 +305,12 @@ let
       esac
       mkdir -p "$TR_SLOTS_DIR"
       reap_own_orphans
-      log "controller up (scope=$TR_SCOPE_TYPE:$TR_SCOPE slots<=$TR_SLOTS_MAX)"
+      log "controller up (scope=$TR_SCOPE_TYPE:$TR_SCOPE slots<=$TR_SLOTS_MAX setup_owner=''${TR_SETUP_OWNER:-0})"
       while :; do
+        # Pre-flight OUTSIDE run_one_job: no trap armed, no slot held, so a
+        # missing base/pin costs neither a bogus teardown warning nor one of
+        # the two guests the other CI lane also draws from.
+        ensure_image || continue
         run_one_job
         sleep 5
       done
@@ -223,23 +326,32 @@ let
       sshpass
     ];
     text = ''
-      # Idempotent per-image bootstrap: digest-pinned pull -> local base clone
-      # -> boot a throwaway clone once to pin the shared SSH host key (all
-      # clones of one image share it). Env: TR_OCI_IMAGE TR_OCI_DIGEST
-      # TR_BASE_IMAGE TR_KNOWN_HOSTS [TR_VM_USER/TR_VM_PASS].
+      # Idempotent per-image bootstrap, in two independently runnable stages:
+      #   image  digest-pinned pull -> local base clone (NO guest boots, so no
+      #          VM slot is needed — this is the multi-GB, multi-hour half)
+      #   pin    boot a throwaway clone once to pin the shared SSH host key
+      #          (all clones of one image share it) — one guest, needs a slot
+      #   all    both, in order (the default; what the operator runs by hand)
+      # The controller calls the stages separately so it never holds one of
+      # Apple's two guest slots during a pull. Env: TR_OCI_IMAGE TR_OCI_DIGEST
+      # TR_BASE_IMAGE TR_KNOWN_HOSTS [TR_NAME TR_VM_USER/TR_VM_PASS].
       : "''${TR_OCI_IMAGE:?}" "''${TR_OCI_DIGEST:?}" "''${TR_BASE_IMAGE:?}" "''${TR_KNOWN_HOSTS:?}"
       TART=${tartBin}
       TR_VM_USER="''${TR_VM_USER:-admin}"
+      stage="''${1:-all}"
+      case "$stage" in image | pin | all) ;; *) echo "usage: tart-runner-setup [image|pin|all]" >&2; exit 2 ;; esac
       case "$TR_OCI_DIGEST" in sha256:*) ;; *) echo "TR_OCI_DIGEST must be sha256:… (digest pin is mandatory)" >&2; exit 2 ;; esac
 
-      if ! "$TART" list --quiet 2>/dev/null | grep -qx "$TR_BASE_IMAGE"; then
+      if [ "$stage" != pin ] && ! "$TART" list --quiet 2>/dev/null | grep -qx "$TR_BASE_IMAGE"; then
         echo "pulling $TR_OCI_IMAGE@$TR_OCI_DIGEST" >&2
         "$TART" pull "$TR_OCI_IMAGE@$TR_OCI_DIGEST"
         "$TART" clone "$TR_OCI_IMAGE@$TR_OCI_DIGEST" "$TR_BASE_IMAGE"
       fi
 
-      if [ ! -s "$TR_KNOWN_HOSTS" ]; then
-        pin="pin-tmp-$$"
+      if [ "$stage" != image ] && [ ! -s "$TR_KNOWN_HOSTS" ]; then
+        # Per-instance name so the controller's reaper can clean up a guest
+        # stranded by a restart mid-pin without touching a sibling's.
+        pin="pin-tmp-''${TR_NAME:-setup}-$$"
         echo "pinning host key via throwaway clone $pin" >&2
         "$TART" clone "$TR_BASE_IMAGE" "$pin"
         "$TART" run --no-graphics "$pin" >/dev/null 2>&1 &
