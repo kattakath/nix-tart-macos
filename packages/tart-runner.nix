@@ -342,10 +342,31 @@ let
       case "$stage" in image | pin | all) ;; *) echo "usage: tart-runner-setup [image|pin|all]" >&2; exit 2 ;; esac
       case "$TR_OCI_DIGEST" in sha256:*) ;; *) echo "TR_OCI_DIGEST must be sha256:… (digest pin is mandatory)" >&2; exit 2 ;; esac
 
+      # A digest-pinned reference is `repo@sha256:…` with NO tag. Appending the
+      # digest to a TAGGED image instead — `…/macos-runner:tahoe@sha256:…`, which
+      # is what TR_OCI_IMAGE carries — is rejected by tart's own parser before a
+      # byte is fetched:
+      #
+      #   failed to parse remote name: mismatched input '@' expecting
+      #   {<EOF>, '.', '-', '_', DIGIT, LETTER} (character 38)
+      #
+      # (character 38 is exactly the '@'.) Docker tolerates tag+digest; tart,
+      # containerd and the OCI grammar do not. This is why the 2026-09-05 digest
+      # bump left the host with no base image and no pin: EVERY pull, manual or
+      # automatic, failed instantly at parse. Verified against tart 2.36.0 —
+      # the tag-stripped form reaches "pulling manifest" and only then 404s on a
+      # deliberately bogus digest.
+      #
+      # Strip only a tag in the LAST path segment: a registry may carry a port
+      # (`registry.example.com:5000/repo`), and `''${ref%:*}` alone would eat it.
+      ociRef="$TR_OCI_IMAGE"
+      case "''${ociRef##*/}" in *:*) ociRef="''${ociRef%:*}" ;; esac
+      pinnedRef="$ociRef@$TR_OCI_DIGEST"
+
       if [ "$stage" != pin ] && ! "$TART" list --quiet 2>/dev/null | grep -qx "$TR_BASE_IMAGE"; then
-        echo "pulling $TR_OCI_IMAGE@$TR_OCI_DIGEST" >&2
-        "$TART" pull "$TR_OCI_IMAGE@$TR_OCI_DIGEST"
-        "$TART" clone "$TR_OCI_IMAGE@$TR_OCI_DIGEST" "$TR_BASE_IMAGE"
+        echo "pulling $pinnedRef" >&2
+        "$TART" pull "$pinnedRef"
+        "$TART" clone "$pinnedRef" "$TR_BASE_IMAGE"
       fi
 
       if [ "$stage" != image ] && [ ! -s "$TR_KNOWN_HOSTS" ]; then
