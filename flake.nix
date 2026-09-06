@@ -30,8 +30,11 @@
         # `tart.runners` option declaration.
         darwinModules.default = ./modules/darwin.nix;
         darwinModules.tart = ./modules/darwin.nix;
-        # Ephemeral GitHub Actions runners in disposable VMs (tart.runners.*).
-        darwinModules.runner = ./modules/tart-runner.nix;
+        # Ephemeral GitHub Actions runners in disposable VMs
+        # (tart.githubRunners.*; tart.runners still works via a renamed-option
+        # alias). `runner` is the pre-rename export name, kept for consumers.
+        darwinModules.github-runner = ./modules/github-runner.nix;
+        darwinModules.runner = ./modules/github-runner.nix;
         # Declarative gitlab-runner wired to the Tart custom executor
         # (tart.gitlabRunner.*); token stays a runtime file, never in-store.
         darwinModules.gitlab-runner = ./modules/gitlab-runner.nix;
@@ -159,7 +162,7 @@
                 inherit (inputs.nixpkgs) lib;
                 eval = lib.evalModules {
                   modules = [
-                    ./modules/tart-runner.nix
+                    ./modules/github-runner.nix
                     {
                       options.environment.systemPackages = lib.mkOption {
                         type = lib.types.listOf lib.types.package;
@@ -173,9 +176,17 @@
                         type = lib.types.listOf lib.types.anything;
                         default = [ ];
                       };
+                      # mkRenamedOptionModule records its deprecation notice
+                      # here — the stub must declare it for the alias to eval.
+                      options.warnings = lib.mkOption {
+                        type = lib.types.listOf lib.types.str;
+                        default = [ ];
+                      };
                     }
                     {
                       _module.args.pkgs = pkgs;
+                      # Deliberately the OLD name — this check also proves the
+                      # tart.runners → tart.githubRunners rename alias fires.
                       tart.runners.smoke = {
                         scope = {
                           type = "org";

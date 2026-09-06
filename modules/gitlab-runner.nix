@@ -10,7 +10,7 @@
 # also execs a bare-`sh` arg0, and its registration flow is the legacy
 # REGISTRATION_TOKEN model, not the modern glrt- authentication token.
 #
-# Secret delivery is the CONSUMER's job, same contract as tart.runners:
+# Secret delivery is the CONSUMER's job, same contract as tart.githubRunners:
 # `tokenFile` points at a runtime file holding ONLY the glrt- runner token
 # (agenix output, manual install, …) — no token material transits Nix. The
 # config.toml is rendered AT AGENT START into ~/.config/nix-gitlab-runner/
@@ -75,8 +75,8 @@ let
 in
 {
   # Shares tart.runnerSlots / tart.runnerStateDir with the GitHub lane (the
-  # module system dedupes a double import when a consumer lists both modules).
-  imports = [ ./tart-runner.nix ];
+  # module system dedupes the double import when a consumer lists both lanes).
+  imports = [ ./slots.nix ];
 
   options.tart.gitlabRunner = {
     enable = lib.mkEnableOption "declarative gitlab-runner with the Tart custom executor";

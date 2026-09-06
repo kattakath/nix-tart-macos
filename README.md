@@ -1,6 +1,6 @@
-# nix-tart-macos
+# nix-tart-vms
 
-[![CI](https://github.com/kattakath/nix-tart-macos/actions/workflows/ci.yml/badge.svg)](https://github.com/kattakath/nix-tart-macos/actions/workflows/ci.yml)
+[![CI](https://github.com/kattakath/nix-tart-vms/actions/workflows/ci.yml/badge.svg)](https://github.com/kattakath/nix-tart-vms/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Built with Nix](https://img.shields.io/badge/built%20with-Nix-5277C3.svg?logo=nixos&logoColor=white)](https://nixos.org)
 
@@ -39,13 +39,13 @@ and no personal data is ever baked into a disk you might publish.
 
 ```nix
 {
-  inputs.tart-macos.url = "github:kattakath/nix-tart-macos";
+  inputs.tart-vms.url = "github:kattakath/nix-tart-vms";
 }
 ```
 
-Then `nix run github:kattakath/nix-tart-macos#tart-vm -- <subcommand> …`, or
+Then `nix run github:kattakath/nix-tart-vms#tart-vm -- <subcommand> …`, or
 wire `tart-macos.packages.aarch64-darwin.tart-vm` /
-`tart-macos.darwinModules.default` into your own flake.
+`tart-vms.darwinModules.default` into your own flake.
 
 ## Quick start
 
@@ -121,7 +121,7 @@ optional start-at-login via launchd:
 
 ```nix
 {
-  imports = [ inputs.tart-macos.darwinModules.default ];
+  imports = [ inputs.tart-vms.darwinModules.default ];
 
   tart.vms.dev = {
     cpu = 6;
@@ -243,7 +243,7 @@ runs a persistent `macvm` sandbox guest (see its
 for the measured VirtioFS-coherence and quarantine-xattr findings that shaped
 this design).
 
-## Ephemeral GitHub Actions runners (`tart.runners.*`)
+## Ephemeral GitHub Actions runners (`tart.githubRunners.*`)
 
 Every CI job gets a fresh, disposable macOS VM; the VM is the security
 boundary (a hostile workflow only destroys its own throwaway guest).
@@ -251,8 +251,8 @@ Multi-instance — N orgs/repos on one host — sharing Apple's hard
 **two-concurrent-macOS-VM** budget through a slot semaphore.
 
 ```nix
-imports = [ nix-tart-macos.darwinModules.runner ];
-tart.runners.myorg = {
+imports = [ nix-tart-vms.darwinModules.github-runner ];
+tart.githubRunners.myorg = {
   scope = { type = "org"; value = "myorg"; };   # or type = "repo"; value = "owner/repo"
   appId = 123456;              # one GitHub App (public) serves many installs
   installationId = 7890123;    # this scope's installation of that App
@@ -282,7 +282,7 @@ The GitLab half needs no custom controller — cirruslabs'
 already runs each GitLab CI job in an ephemeral Tart VM via gitlab-runner's
 custom-executor interface. This flake packages its release binary (nixpkgs
 carries it nowhere) and adds **slot shims** so its VMs share the host's
-two-macOS-guest budget with the `tart.runners.*` GitHub controllers —
+two-macOS-guest budget with the `tart.githubRunners.*` GitHub controllers —
 `packages/tart-slots.nix` is the single semaphore protocol both speak
 (GitHub slots are pid-owned; GitLab slots are keyed by the executor's
 deterministic `gitlab-<CI_JOB_ID>` VM name, since its prepare process exits
@@ -310,7 +310,7 @@ tart.gitlabRunner = {
 **Imperative** — keep your own `~/.gitlab-runner/config.toml`:
 
 ```sh
-nix run github:kattakath/nix-tart-macos#... tart-gitlab-print-config
+nix run github:kattakath/nix-tart-vms#... tart-gitlab-print-config
 # paste the printed [runners.custom] stanza into ~/.gitlab-runner/config.toml
 ```
 
