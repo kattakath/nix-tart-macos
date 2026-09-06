@@ -26,6 +26,8 @@
         # consumer flake's darwinConfigurations modules list.
         darwinModules.default = import ./modules/darwin.nix;
         darwinModules.tart = import ./modules/darwin.nix;
+        # Ephemeral GitHub Actions runners in disposable VMs (tart.runners.*).
+        darwinModules.runner = import ./modules/tart-runner.nix;
       };
 
       perSystem =
@@ -130,6 +132,65 @@
                       exit 1
                       ;;
                   esac
+                  test -x "$arg0"
+                  touch "$out"
+                '';
+
+            tart-runner = (pkgs.callPackage ./packages/tart-runner.nix { }).controller;
+
+            runner-module =
+              let
+                inherit (inputs.nixpkgs) lib;
+                eval = lib.evalModules {
+                  modules = [
+                    ./modules/tart-runner.nix
+                    {
+                      options.environment.systemPackages = lib.mkOption {
+                        type = lib.types.listOf lib.types.package;
+                        default = [ ];
+                      };
+                      options.launchd.user.agents = lib.mkOption {
+                        type = lib.types.attrsOf lib.types.anything;
+                        default = { };
+                      };
+                      options.assertions = lib.mkOption {
+                        type = lib.types.listOf lib.types.anything;
+                        default = [ ];
+                      };
+                    }
+                    {
+                      _module.args.pkgs = pkgs;
+                      tart.runners.smoke = {
+                        scope = {
+                          type = "org";
+                          value = "example-org";
+                        };
+                        appId = 1;
+                        installationId = 1;
+                        privateKeyPath = "/etc/github-runner/key.pem";
+                        image = {
+                          oci = "ghcr.io/cirruslabs/macos-runner:tahoe";
+                          digest = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+                        };
+                      };
+                    }
+                  ];
+                };
+                agent = eval.config.launchd.user.agents."tart-runner-smoke".serviceConfig;
+                slotAssert = builtins.head eval.config.assertions;
+              in
+              pkgs.runCommand "runner-module-eval"
+                {
+                  arg0 = builtins.head agent.ProgramArguments;
+                  slotsOk = if slotAssert.assertion then "1" else "0";
+                }
+                ''
+                  # arg0 rule + the <=2-VM assertion, both asserted mechanically.
+                  case "$(basename "$arg0")" in
+                    nix-tart-runner-smoke) : ;;
+                    *) echo "arg0 rule violated: $arg0" >&2; exit 1 ;;
+                  esac
+                  [ "$slotsOk" = "1" ] || { echo "default runnerSlots failed its own assertion" >&2; exit 1; }
                   test -x "$arg0"
                   touch "$out"
                 '';

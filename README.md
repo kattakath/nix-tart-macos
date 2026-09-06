@@ -243,6 +243,38 @@ runs a persistent `macvm` sandbox guest (see its
 for the measured VirtioFS-coherence and quarantine-xattr findings that shaped
 this design).
 
+## Ephemeral GitHub Actions runners (`tart.runners.*`)
+
+Every CI job gets a fresh, disposable macOS VM; the VM is the security
+boundary (a hostile workflow only destroys its own throwaway guest).
+Multi-instance — N orgs/repos on one host — sharing Apple's hard
+**two-concurrent-macOS-VM** budget through a slot semaphore.
+
+```nix
+imports = [ nix-tart-macos.darwinModules.runner ];
+tart.runners.myorg = {
+  scope = { type = "org"; value = "myorg"; };   # or type = "repo"; value = "owner/repo"
+  appId = 123456;              # one GitHub App (public) serves many installs
+  installationId = 7890123;    # this scope's installation of that App
+  privateKeyPath = "/run/agenix/gh-app-key";    # consumer delivers the PEM
+  image = {
+    oci = "ghcr.io/cirruslabs/macos-runner:tahoe";
+    digest = "sha256:…";       # digest pin is mandatory
+  };
+};
+```
+
+Per instance: run `tart-runner-setup-<name>` once (digest-pinned pull, base
+clone, SSH host-key pin) — then the LaunchAgent loops forever: mint a 1-hour
+token → clone → boot headless → run **one** `--ephemeral` job over pinned
+SSH → delete the VM. Runner names are `<instance>-<uuid>` (never
+`--replace`), orphan reapers are scoped per instance, and controllers must
+run in a **GUI login session** (a Virtualization.framework keychain
+requirement — there is deliberately no daemon mode). Provenance: hardened
+bones from [a1678991/github-tart-runner](https://github.com/a1678991/github-tart-runner)
+(MIT, notice preserved in `packages/tart-runner.nix`); the multi-instance
+fixes are this repo's.
+
 ## License
 
 MIT © Ismail Kattakath — except
