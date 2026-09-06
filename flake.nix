@@ -350,6 +350,7 @@
                     gl.StandardErrorPath
                   ];
                   controller = (pkgs.callPackage ./packages/tart-runner.nix { }).controller;
+                  setup = (pkgs.callPackage ./packages/tart-runner.nix { }).setup;
                   assertionsOk = if lib.all (a: a.assertion) eval.config.assertions then "1" else "0";
                 }
                 ''
@@ -389,7 +390,22 @@
                   grep -q 'ensure_image || continue' "$ctl" || fail "controller main loop lost its pre-flight guard"
                   grep -q 'base_present && pin_present' "$ctl" || fail "pre-flight no longer gates on BOTH the base image and the host-key pin"
 
-                  # (g) exactly one owner per distinct image.
+                  # (g) the digest-pinned reference must never carry a tag as
+                  # well. `repo:tag@sha256:…` is rejected by tart's parser
+                  # ("mismatched input '@'") before a byte is fetched, so every
+                  # pull — manual or automatic — fails instantly and the host is
+                  # left with no base image and no pin. That is what the
+                  # 2026-09-05 digest bump actually did.
+                  setupBin="$setup/bin/tart-runner-setup"
+                  grep -q 'ociRef="\$TR_OCI_IMAGE"' "$setupBin" \
+                    || fail "setup no longer strips the tag before appending the digest"
+                  grep -q 'pull "\$pinnedRef"' "$setupBin" \
+                    || fail "setup does not pull the tag-stripped, digest-pinned ref"
+                  if grep -q 'pull "\$TR_OCI_IMAGE@\$TR_OCI_DIGEST"' "$setupBin"; then
+                    fail "setup pulls tag+digest together — tart's parser rejects that ref"
+                  fi
+
+                  # (h) exactly one owner per distinct image.
                   owners=0
                   for w in "$alphaArg0" "$betaArg0"; do
                     if grep -Eq "TR_SETUP_OWNER='?1'?$" "$w"; then owners=$((owners + 1)); fi
