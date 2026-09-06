@@ -116,9 +116,14 @@ let
       TR_RUNNER_GROUP="''${TR_RUNNER_GROUP:-Default}"
       TR_RUNNER_DIR="''${TR_RUNNER_DIR:-/Users/admin/actions-runner}"
       TR_BOOT_TIMEOUT="''${TR_BOOT_TIMEOUT:-180}"
-      # A first pull of a Cirrus macOS runner image is tens of GB — hours on a
-      # home link, not the ~180s a pin boot costs. Bounded so a wedged pull
-      # cannot hold the loop forever.
+      # A first pull of a Cirrus macOS runner image is HUNDREDS of GB, not the
+      # "tens" earlier revisions of this comment claimed: macos-runner:tahoe
+      # measured 222 GB on 2026-09-06 (`tart list` Size column), and consumed
+      # ~138 GB of free space while staging into ~/.tart/tmp before dedup.
+      # Hours on a home link, against the ~180s a pin boot costs — which is why
+      # the pull deliberately holds NO slot. Bounded so a wedged pull cannot
+      # hold the loop forever; 4h is generous for a warm link and tight for a
+      # cold one, so raise TR_PULL_TIMEOUT rather than assume it is enough.
       TR_PULL_TIMEOUT="''${TR_PULL_TIMEOUT:-14400}"
 
       log() { echo "[$(date -u +%FT%TZ)] [$TR_NAME] $*" >&2; }
@@ -128,6 +133,35 @@ let
       # jobs while no runner is registered.
       # shellcheck disable=SC1091
       source ${slotsLib}
+
+      # --- the ONE way this controller talks to a guest. Defined once so the
+      # readiness probe and the real job session cannot drift apart: the probe
+      # only proves something if it uses byte-identical flags.
+      #
+      # `-F /dev/null` is load-bearing, not tidiness. Without it ssh reads the
+      # OPERATOR's ~/.ssh/config, and this ssh is nixpkgs' OpenSSH, not Apple's.
+      # `UseKeychain` is an Apple-only patch, so a perfectly valid personal
+      # config killed every guest session before a job could run (2026-09-06):
+      #
+      #   /Users/…/.ssh/config: line 23: Bad configuration option: usekeychain
+      #   guest session rc=255 (job failure or ssh drop)
+      #
+      # The guest connection is machine-to-machine and fully specified here; it
+      # must inherit nothing from the login user. Credentials stay in the env
+      # (never argv beyond sshpass's own flag) and the host key is pinned —
+      # fail-closed, never StrictHostKeyChecking=no.
+      guest_ssh() {
+        local host="$1"; shift
+        sshpass -p "$TR_VM_PASS" ssh \
+          -F /dev/null \
+          -o UserKnownHostsFile="$TR_KNOWN_HOSTS" \
+          -o StrictHostKeyChecking=yes \
+          -o PreferredAuthentications=password \
+          -o PubkeyAuthentication=no \
+          -o IdentityAgent=none \
+          -o ConnectTimeout=10 \
+          "$TR_VM_USER@$host" "$@"
+      }
 
       # --- reaper: ONLY this instance's prefixes — never siblings'. pin-tmp-*
       # is in scope because the pin boot now runs from this KeepAlive
@@ -145,7 +179,7 @@ let
 
       # --- GC: a digest bump renames the base clone (both it and the pin are
       # keyed by sha256(oci@digest)), so superseded tr-base-* would accumulate
-      # at tens of GB each. TR_LIVE_BASES is the set EVERY enabled instance on
+      # at ~222 GB each (macos-runner:tahoe, measured 2026-09-06). TR_LIVE_BASES is the set EVERY enabled instance on
       # this host still needs, computed in modules/github-runner.nix, so this
       # can never delete a sibling's base.
       #
@@ -269,6 +303,26 @@ let
           ip=$("$TART" ip "$vm" 2>/dev/null || true)
         done
         [ -n "$ip" ] || { log "no IP within ''${TR_BOOT_TIMEOUT}s"; return 1; }
+
+        # AN IP IS NOT READINESS. macOS answers on :22 while opendirectoryd is
+        # still starting, so a CORRECT password is rejected for the first few
+        # seconds. Observed 2026-09-06: a guest contacted 3s after its IP
+        # appeared returned
+        #
+        #   Permission denied, please try again.
+        #   admin@…: Permission denied (publickey,password,keyboard-interactive).
+        #
+        # while sibling lanes a few seconds slower reached "Listening for Jobs".
+        # Treating that refusal as a job failure throws away a whole clone+boot
+        # cycle and the slot it held, for a guest that was about to be fine.
+        local ready=0 probed=0
+        while [ "$probed" -lt "$TR_BOOT_TIMEOUT" ]; do
+          if guest_ssh "$ip" true >/dev/null 2>&1; then ready=1; break; fi
+          sleep 5
+          probed=$((probed + 5))
+        done
+        [ "$ready" = 1 ] || { log "guest at $ip never accepted ssh within ''${TR_BOOT_TIMEOUT}s"; return 1; }
+
         log "guest up at $ip; registering runner $TR_NAME-$uuid and running one job"
 
         # Secrets ride stdin, never argv. Unique --name per clone; --ephemeral
@@ -286,26 +340,7 @@ let
         --no-default-labels --labels "$LABELS"
       ./run.sh
       GUEST
-        } | sshpass -p "$TR_VM_PASS" ssh \
-          -F /dev/null \
-          -o UserKnownHostsFile="$TR_KNOWN_HOSTS" \
-          -o StrictHostKeyChecking=yes \
-          -o PreferredAuthentications=password \
-          -o PubkeyAuthentication=no \
-          -o IdentityAgent=none \
-          "$TR_VM_USER@$ip" 'bash -s'
-        # `-F /dev/null` above is load-bearing, not tidiness. Without it ssh
-        # reads the OPERATOR's ~/.ssh/config, and this ssh is nixpkgs' OpenSSH,
-        # not Apple's. `UseKeychain` is an Apple-only patch, so a perfectly
-        # valid personal config kills every guest session before a job runs:
-        #
-        #   /Users/…/.ssh/config: line 23: Bad configuration option: usekeychain
-        #   /Users/…/.ssh/config: terminating, 1 bad configuration options
-        #   guest session rc=255 (job failure or ssh drop)
-        #
-        # Observed 2026-09-06 on the first guest boot after the runners came
-        # back. The guest connection is machine-to-machine and fully specified
-        # by the -o flags here; it must inherit nothing from the login user.
+        } | guest_ssh "$ip" 'bash -s'
         rc=$?
         [ "$rc" -eq 0 ] || log "guest session rc=$rc (job failure or ssh drop)"
         return "$rc"
