@@ -43,6 +43,54 @@
       perSystem =
         { pkgs, system, ... }:
         let
+          inherit (inputs.nixpkgs) lib;
+
+          # The nix-darwin option surface the runner modules write to or read
+          # from — stubbed so the module checks smoke-eval without a nix-darwin
+          # input. `system.primaryUser*` are here because modules/slots.nix
+          # derives its durable default from primaryUserHome, and
+          # `activationScripts` because both lanes mkdir that dir before
+          # launchd opens their log paths.
+          darwinStubs = {
+            options.environment.systemPackages = lib.mkOption {
+              type = lib.types.listOf lib.types.package;
+              default = [ ];
+            };
+            options.launchd.user.agents = lib.mkOption {
+              type = lib.types.attrsOf lib.types.anything;
+              default = { };
+            };
+            options.assertions = lib.mkOption {
+              type = lib.types.listOf lib.types.anything;
+              default = [ ];
+            };
+            # mkRenamedOptionModule records its deprecation notice here — the
+            # stub must declare it for the alias to eval.
+            options.warnings = lib.mkOption {
+              type = lib.types.listOf lib.types.str;
+              default = [ ];
+            };
+            options.system.primaryUser = lib.mkOption {
+              type = lib.types.str;
+              default = "tester";
+            };
+            options.system.primaryUserHome = lib.mkOption {
+              type = lib.types.str;
+              default = "/Users/tester";
+            };
+            options.system.activationScripts = lib.mkOption {
+              type = lib.types.attrsOf (
+                lib.types.submodule {
+                  options.text = lib.mkOption {
+                    type = lib.types.lines;
+                    default = "";
+                  };
+                }
+              );
+              default = { };
+            };
+          };
+
           packages = rec {
             packer-plugin-tart = pkgs.callPackage ./packages/packer-plugin-tart.nix { };
             tart-guest-agent = pkgs.callPackage ./packages/tart-guest-agent.nix { };
@@ -159,30 +207,10 @@
 
             runner-module =
               let
-                inherit (inputs.nixpkgs) lib;
                 eval = lib.evalModules {
                   modules = [
                     ./modules/github-runner.nix
-                    {
-                      options.environment.systemPackages = lib.mkOption {
-                        type = lib.types.listOf lib.types.package;
-                        default = [ ];
-                      };
-                      options.launchd.user.agents = lib.mkOption {
-                        type = lib.types.attrsOf lib.types.anything;
-                        default = { };
-                      };
-                      options.assertions = lib.mkOption {
-                        type = lib.types.listOf lib.types.anything;
-                        default = [ ];
-                      };
-                      # mkRenamedOptionModule records its deprecation notice
-                      # here — the stub must declare it for the alias to eval.
-                      options.warnings = lib.mkOption {
-                        type = lib.types.listOf lib.types.str;
-                        default = [ ];
-                      };
-                    }
+                    darwinStubs
                     {
                       _module.args.pkgs = pkgs;
                       # Deliberately the OLD name — this check also proves the
@@ -223,24 +251,10 @@
                 '';
             gitlab-runner-module =
               let
-                inherit (inputs.nixpkgs) lib;
                 eval = lib.evalModules {
                   modules = [
                     ./modules/gitlab-runner.nix
-                    {
-                      options.environment.systemPackages = lib.mkOption {
-                        type = lib.types.listOf lib.types.package;
-                        default = [ ];
-                      };
-                      options.launchd.user.agents = lib.mkOption {
-                        type = lib.types.attrsOf lib.types.anything;
-                        default = { };
-                      };
-                      options.assertions = lib.mkOption {
-                        type = lib.types.listOf lib.types.anything;
-                        default = [ ];
-                      };
-                    }
+                    darwinStubs
                     {
                       _module.args.pkgs = pkgs;
                       tart.gitlabRunner = {
@@ -271,6 +285,117 @@
                       echo "wrapper lost the $stage shim reference" >&2; exit 1;
                     }
                   done
+                  touch "$out"
+                '';
+
+            # The cross-lane state-dir contract, which nothing asserted before
+            # 2026-09-05: BOTH lanes must derive slots, pins and logs from the
+            # ONE tart.runnerStateDir. A base-dir move used to pass every check
+            # whether or not it was internally consistent, and the /tmp literal
+            # left behind in github-runner.nix's log paths went unnoticed for
+            # as long as it existed.
+            state-dir =
+              let
+                stateDir = "/Users/tester/.local/state/tart-runner";
+                # Two instances, ONE image — so exactly one must be elected
+                # the re-pin/pull owner.
+                sharedRunner = {
+                  scope = {
+                    type = "org";
+                    value = "example-org";
+                  };
+                  appId = 1;
+                  installationId = 1;
+                  privateKeyPath = "/etc/github-runner/key.pem";
+                  image = {
+                    oci = "ghcr.io/cirruslabs/macos-runner:tahoe";
+                    digest = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+                  };
+                };
+                eval = lib.evalModules {
+                  modules = [
+                    ./modules/github-runner.nix
+                    ./modules/gitlab-runner.nix
+                    darwinStubs
+                    {
+                      _module.args.pkgs = pkgs;
+                      tart.runnerStateDir = stateDir;
+                      tart.githubRunners = {
+                        alpha = sharedRunner;
+                        beta = sharedRunner;
+                      };
+                      tart.gitlabRunner = {
+                        enable = true;
+                        runnerName = "smoke";
+                        tokenFile = "/run/agenix/gitlab-runner-token";
+                      };
+                    }
+                  ];
+                };
+                gh = n: eval.config.launchd.user.agents."tart-runner-${n}".serviceConfig;
+                gl = eval.config.launchd.user.agents.gitlab-runner.serviceConfig;
+              in
+              pkgs.runCommand "state-dir-eval"
+                {
+                  inherit stateDir;
+                  alphaArg0 = builtins.head (gh "alpha").ProgramArguments;
+                  betaArg0 = builtins.head (gh "beta").ProgramArguments;
+                  glArg0 = builtins.head gl.ProgramArguments;
+                  logPaths = [
+                    (gh "alpha").StandardOutPath
+                    (gh "alpha").StandardErrorPath
+                    (gh "beta").StandardOutPath
+                    (gh "beta").StandardErrorPath
+                    gl.StandardOutPath
+                    gl.StandardErrorPath
+                  ];
+                  controller = (pkgs.callPackage ./packages/tart-runner.nix { }).controller;
+                  assertionsOk = if lib.all (a: a.assertion) eval.config.assertions then "1" else "0";
+                }
+                ''
+                  fail() { echo "$*" >&2; exit 1; }
+
+                  [ "$assertionsOk" = "1" ] || fail "the durable/whitespace state-dir assertions rejected their own default shape"
+
+                  # (a)+(b) every agent log path follows the option.
+                  for p in $logPaths; do
+                    case "$p" in "$stateDir"/*) : ;; *) fail "log path escaped tart.runnerStateDir: $p" ;; esac
+                  done
+
+                  # (c) THE cross-lane invariant: one slots dir, or the
+                  # two-guest semaphore silently stops being shared and a third
+                  # guest fails inside Virtualization.framework mid-job.
+                  for w in "$alphaArg0" "$betaArg0" "$glArg0"; do
+                    grep -Eq "TR_SLOTS_DIR='?$stateDir/slots'?$" "$w" || fail "lane wrapper does not resolve $stateDir/slots: $w"
+                  done
+
+                  # (d) no volatile literal survives in any wrapper.
+                  for w in "$alphaArg0" "$betaArg0" "$glArg0"; do
+                    if grep -q "/tmp/" "$w"; then fail "wrapper still carries a /tmp literal: $w"; fi
+                  done
+                  for p in $logPaths; do
+                    case "$p" in /tmp/* | /private/tmp/* | /var/tmp/*) fail "volatile log path: $p" ;; *) : ;; esac
+                  done
+
+                  # (e) no whitespace anywhere ssh will re-tokenize: it splits
+                  # the -o UserKnownHostsFile argument on it.
+                  case "$stateDir" in *[[:space:]]*) fail "state dir contains whitespace" ;; esac
+                  grep -Eq "TR_KNOWN_HOSTS='?$stateDir/pins/[0-9a-f]{12}\.known_hosts'?$" "$alphaArg0" \
+                    || fail "pin path is not a whitespace-free, digest-keyed path under $stateDir"
+
+                  # (f) the controller's pre-flight gates on BOTH artifacts a
+                  # digest bump renames, and runs OUTSIDE the job function.
+                  ctl="$controller/bin/tart-runner-controller"
+                  grep -q 'ensure_image || continue' "$ctl" || fail "controller main loop lost its pre-flight guard"
+                  grep -q 'base_present && pin_present' "$ctl" || fail "pre-flight no longer gates on BOTH the base image and the host-key pin"
+
+                  # (g) exactly one owner per distinct image.
+                  owners=0
+                  for w in "$alphaArg0" "$betaArg0"; do
+                    if grep -Eq "TR_SETUP_OWNER='?1'?$" "$w"; then owners=$((owners + 1)); fi
+                  done
+                  [ "$owners" = 1 ] || fail "expected exactly 1 re-pin owner for one shared image, got $owners"
+
                   touch "$out"
                 '';
           };

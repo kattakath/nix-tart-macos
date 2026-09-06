@@ -66,7 +66,14 @@ let
 
   slotEnvDefaults = ''
     export TART="''${TART:-${tartBin}}"
-    export TR_SLOTS_DIR="''${TR_SLOTS_DIR:-/tmp/tart-runner/slots}"
+    # Fallback ONLY for the imperative `tart-gitlab-print-config` route — the
+    # declarative agent exports the real value (modules/gitlab-runner.nix).
+    # This literal MUST track modules/slots.nix's runnerStateDir default: if
+    # the two lanes ever resolve different slot dirs, the two-guest semaphore
+    # silently stops being shared and a third guest fails inside
+    # Virtualization.framework mid-job. Resolved from $HOME at RUNTIME (the
+    # packages/tart-vm.nix pattern), never a /Users/<name> literal.
+    export TR_SLOTS_DIR="''${TR_SLOTS_DIR:-$HOME/.local/state/tart-runner/slots}"
     export TR_SLOTS_MAX="''${TR_SLOTS_MAX:-2}"
     # shellcheck disable=SC1091
     source ${slotsLib}

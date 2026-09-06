@@ -238,10 +238,10 @@ VM name is always a parameter: leading positional (`tart-vm start dev`) or
 
 The machinery here is extracted and generalized from
 **[kattakath/nix-config](https://github.com/kattakath/nix-config)**, where it
-runs a persistent `macvm` sandbox guest (see its
-[`docs/macvm-tart-runbook.md`](https://github.com/kattakath/nix-config/blob/main/docs/macvm-tart-runbook.md)
+ran a persistent `macvm` sandbox guest until 2026-09-05 (see its
+[`docs/macvm-readd-runbook.md`](https://github.com/kattakath/nix-config/blob/main/docs/macvm-readd-runbook.md)
 for the measured VirtioFS-coherence and quarantine-xattr findings that shaped
-this design).
+this design, and what re-adding the guest would take).
 
 ## Ephemeral GitHub Actions runners (`tart.githubRunners.*`)
 
@@ -252,6 +252,11 @@ Multi-instance — N orgs/repos on one host — sharing Apple's hard
 
 ```nix
 imports = [ nix-tart-vms.darwinModules.github-runner ];
+# Durable state shared with the GitLab lane below — slots, host-key pins and
+# BOTH lanes' logs. Defaults to ~/.local/state/tart-runner (derived from
+# nix-darwin's system.primaryUserHome). It must be reboot-durable, writable by
+# the GUI login user, and whitespace-free; the module asserts all three.
+tart.runnerStateDir = "/Users/me/.local/state/tart-runner";
 tart.githubRunners.myorg = {
   scope = { type = "org"; value = "myorg"; };   # or type = "repo"; value = "owner/repo"
   appId = 123456;              # one GitHub App (public) serves many installs
@@ -264,14 +269,27 @@ tart.githubRunners.myorg = {
 };
 ```
 
-Per instance: run `tart-runner-setup-<name>` once (digest-pinned pull, base
-clone, SSH host-key pin) — then the LaunchAgent loops forever: mint a 1-hour
-token → clone → boot headless → run **one** `--ephemeral` job over pinned
-SSH → delete the VM. Runner names are `<instance>-<uuid>` (never
-`--replace`), orphan reapers are scoped per instance, and controllers must
-run in a **GUI login session** (a Virtualization.framework keychain
-requirement — there is deliberately no daemon mode). Provenance: hardened
-bones from [a1678991/github-tart-runner](https://github.com/a1678991/github-tart-runner)
+The LaunchAgent loops forever: mint a 1-hour token → clone → boot headless →
+run **one** `--ephemeral` job over pinned SSH → delete the VM. Runner names
+are `<instance>-<uuid>` (never `--replace`), orphan reapers are scoped per
+instance, and controllers must run in a **GUI login session** (a
+Virtualization.framework keychain requirement — there is deliberately no
+daemon mode).
+
+**On images and pins.** The local base clone *and* the SSH host-key pin are
+content-keyed by `sha256(oci@digest)`, so **bumping the digest renames both** —
+by design (a new image genuinely has a new host key, and a fixed pin path would
+let a stale pin authenticate a new guest). It is therefore not a one-time
+setup: on a bump, one elected instance per distinct image re-creates them by
+itself on its next cycle — pulling with **no** VM slot held (a first pull is
+tens of GB), then taking a slot for the single throwaway pin boot. Watch
+`<runnerStateDir>/<owning-instance>.log`; the other instances on that image
+just log that they are waiting. `tart-runner-setup-<name> [image|pin|all]`
+still exists to pre-warm a bump or to debug one by hand. Superseded
+`tr-base-*` images are garbage-collected by the same owner at startup.
+
+Provenance: hardened bones from
+[a1678991/github-tart-runner](https://github.com/a1678991/github-tart-runner)
 (MIT, notice preserved in `packages/tart-runner.nix`); the multi-instance
 fixes are this repo's.
 
@@ -305,6 +323,10 @@ tart.gitlabRunner = {
   tokenFile = "/run/agenix/gitlab-runner-token"; # agenix, or any runtime path
   concurrent = 2; # may exceed the VM budget — the slot shims serialize
 };
+# Same option, same directory as the GitHub lane above — that shared value IS
+# the two-guest semaphore. Point the two lanes at different dirs and each gets
+# its own budget, which Apple's framework will then refuse mid-job.
+tart.runnerStateDir = "/Users/me/.local/state/tart-runner";
 ```
 
 **Imperative** — keep your own `~/.gitlab-runner/config.toml`:
