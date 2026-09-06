@@ -41,10 +41,9 @@ let
       export TR_SLOTS_DIR=${lib.escapeShellArg "${tartCfg.runnerStateDir}/slots"}
       export TR_SLOTS_MAX=${toString tartCfg.runnerSlots}
 
-      until [ -r ${lib.escapeShellArg cfg.tokenFile} ]; do
-        echo "nix-gitlab-runner: waiting for token file ${cfg.tokenFile}" >&2
-        sleep 5
-      done
+      # No wait loop here — launchd gates the whole agent on the token file's
+      # existence (KeepAlive.PathState below), so by the time this runs the
+      # file is there; a missing/unreadable one is a hard exit, not a spin.
       token="$(tr -d '[:space:]' < ${lib.escapeShellArg cfg.tokenFile})"
 
       confDir="''${HOME}/.config/nix-gitlab-runner"
@@ -118,7 +117,19 @@ in
       serviceConfig = {
         ProgramArguments = [ "${runner}/bin/nix-gitlab-runner" ];
         RunAtLoad = true;
-        KeepAlive = true;
+        # Waiting for the runtime token file is launchd's job, not a shell
+        # poll's: upstream option
+        # nix-darwin.launchd.user.agents.<name>.serviceConfig.KeepAlive.PathState
+        # exists (modules/launchd/launchd.nix:190 — attrsOf bool, "the job will
+        # be kept alive as long as the path exists ... the intent of this
+        # feature is that two or more jobs may create semaphores in the
+        # file-system namespace") → using it. Before the consumer materializes
+        # the token the agent simply stays down; the moment it lands launchd
+        # starts us. Restart-on-crash is unchanged — the path outlives any one
+        # `gitlab-runner run`.
+        KeepAlive.PathState = {
+          "${cfg.tokenFile}" = true;
+        };
         ProcessType = "Background";
         StandardOutPath = "${tartCfg.runnerStateDir}/gitlab-runner.log";
         StandardErrorPath = "${tartCfg.runnerStateDir}/gitlab-runner.log";
