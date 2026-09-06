@@ -287,12 +287,25 @@ let
       ./run.sh
       GUEST
         } | sshpass -p "$TR_VM_PASS" ssh \
+          -F /dev/null \
           -o UserKnownHostsFile="$TR_KNOWN_HOSTS" \
           -o StrictHostKeyChecking=yes \
           -o PreferredAuthentications=password \
           -o PubkeyAuthentication=no \
           -o IdentityAgent=none \
           "$TR_VM_USER@$ip" 'bash -s'
+        # `-F /dev/null` above is load-bearing, not tidiness. Without it ssh
+        # reads the OPERATOR's ~/.ssh/config, and this ssh is nixpkgs' OpenSSH,
+        # not Apple's. `UseKeychain` is an Apple-only patch, so a perfectly
+        # valid personal config kills every guest session before a job runs:
+        #
+        #   /Users/…/.ssh/config: line 23: Bad configuration option: usekeychain
+        #   /Users/…/.ssh/config: terminating, 1 bad configuration options
+        #   guest session rc=255 (job failure or ssh drop)
+        #
+        # Observed 2026-09-06 on the first guest boot after the runners came
+        # back. The guest connection is machine-to-machine and fully specified
+        # by the -o flags here; it must inherit nothing from the login user.
         rc=$?
         [ "$rc" -eq 0 ] || log "guest session rc=$rc (job failure or ssh drop)"
         return "$rc"
@@ -385,9 +398,23 @@ let
           mkdir -p "$(dirname "$TR_KNOWN_HOSTS")"
           ssh-keyscan -t ed25519 "$ip" 2>/dev/null | sed "s/^$ip/*/" > "$TR_KNOWN_HOSTS"
         fi
+        # `tart stop` returns before the guest has actually gone, and `tart
+        # delete` REFUSES a running VM — so the old stop-then-delete-then-|| true
+        # swallowed the failure and leaked a RUNNING pin guest. That is worse
+        # than a stray disk clone: it silently consumes one of Apple's two
+        # concurrent macOS guests, which the slot semaphore cannot see (the pin
+        # holds no slot marker of its own), so the next lane's boot fails inside
+        # Virtualization.framework instead of queueing. Observed 2026-09-06.
+        # Wait for the state to actually leave `running` before deleting.
         "$TART" stop "$pin" >/dev/null 2>&1 || true
         kill "$rp" 2>/dev/null || true; wait "$rp" 2>/dev/null || true
-        "$TART" delete "$pin" >/dev/null 2>&1 || true
+        gone=0
+        for _ in $(seq 1 30); do
+          "$TART" list --quiet 2>/dev/null | grep -qx "$pin" || { gone=1; break; }
+          "$TART" delete "$pin" >/dev/null 2>&1 && { gone=1; break; }
+          sleep 2
+        done
+        [ "$gone" = 1 ] || echo "WARNING: pin guest $pin still present — it consumes one of Apple's two guests" >&2
         [ -s "$TR_KNOWN_HOSTS" ] || { echo "host-key pin FAILED" >&2; exit 1; }
       fi
       echo "setup ok: base=$TR_BASE_IMAGE pin=$TR_KNOWN_HOSTS" >&2
