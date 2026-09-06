@@ -288,10 +288,30 @@ two-macOS-guest budget with the `tart.runners.*` GitHub controllers —
 deterministic `gitlab-<CI_JOB_ID>` VM name, since its prepare process exits
 while the VM lives on).
 
+Two ways to wire gitlab-runner to it:
+
+**Declarative** — `darwinModules.gitlab-runner` runs gitlab-runner itself as a
+GUI-session LaunchAgent (`nix-gitlab-runner` arg0) and renders its config.toml
+at agent start from a runtime token file, so the `glrt-…` token never enters
+the Nix store. (nix-darwin's own `services.gitlab-runner` can't do this job:
+it is a launchd *daemon* under a service user, and Tart guests only boot in
+the GUI login session; it also still speaks the legacy registration-token
+flow.) Registration — minting the token — stays a one-time manual act.
+
+```nix
+tart.gitlabRunner = {
+  enable = true;
+  runnerName = "my-mac";
+  tokenFile = "/run/agenix/gitlab-runner-token"; # agenix, or any runtime path
+  concurrent = 2; # may exceed the VM budget — the slot shims serialize
+};
+```
+
+**Imperative** — keep your own `~/.gitlab-runner/config.toml`:
+
 ```sh
 nix run github:kattakath/nix-tart-macos#... tart-gitlab-print-config
 # paste the printed [runners.custom] stanza into ~/.gitlab-runner/config.toml
-# (the config.toml — and its glrt-… runner token — stays imperative on purpose)
 ```
 
 gitlab-runner **always** runs the cleanup stage, even after a failed prepare,

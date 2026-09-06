@@ -125,7 +125,9 @@ let
     TR_RUNNER_DIR = r.runnerDirInGuest;
   };
 
-  envExports = env: lib.concatStringsSep "\n" (lib.mapAttrsToList (k: v: "export ${k}=${lib.escapeShellArg v}") env);
+  envExports =
+    env:
+    lib.concatStringsSep "\n" (lib.mapAttrsToList (k: v: "export ${k}=${lib.escapeShellArg v}") env);
 in
 {
   options.tart = {

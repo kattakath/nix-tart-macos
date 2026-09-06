@@ -18,8 +18,10 @@
 #                            longer in `tart list`) covers hard crashes.
 #   nix-gitlab-tart-config   passthrough (executor's config stage).
 # `tart-gitlab-print-config` prints the exact config.toml stanza with these
-# store paths — config.toml itself stays imperative (it holds the glrt-…
-# runner token; the fleet's no-secrets-in-nix boundary).
+# store paths, for a hand-managed config.toml. The declarative alternative is
+# modules/gitlab-runner.nix (tart.gitlabRunner.*), which renders config.toml
+# at agent start from a runtime token file — either way the glrt-… runner
+# token never enters the store (the fleet's no-secrets-in-nix boundary).
 #
 # macOS 15+ note (upstream README): the "Local Network" privacy gate can stall
 # VM SSH; either run prepare/run via the executor's privileged
