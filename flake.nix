@@ -4,6 +4,8 @@
   inputs = {
     flake-parts.url = "github:hercules-ci/flake-parts";
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    treefmt-nix.url = "github:numtide/treefmt-nix";
+    treefmt-nix.inputs.nixpkgs.follows = "nixpkgs";
   };
 
   nixConfig = {
@@ -16,6 +18,8 @@
   outputs =
     inputs@{ flake-parts, ... }:
     flake-parts.lib.mkFlake { inherit inputs; } {
+      imports = [ inputs.treefmt-nix.flakeModule ];
+
       # Tart drives Apple Virtualization.framework — this toolkit is
       # aarch64-darwin only, by nature (Tart supports Apple Silicon only).
       systems = [ "aarch64-darwin" ];
@@ -334,6 +338,7 @@
                 };
                 gh = n: eval.config.launchd.user.agents."tart-runner-${n}".serviceConfig;
                 gl = eval.config.launchd.user.agents.gitlab-runner.serviceConfig;
+                tartRunner = pkgs.callPackage ./packages/tart-runner.nix { };
               in
               pkgs.runCommand "state-dir-eval"
                 {
@@ -349,10 +354,9 @@
                     gl.StandardOutPath
                     gl.StandardErrorPath
                   ];
-                  controller = (pkgs.callPackage ./packages/tart-runner.nix { }).controller;
-                  setup = (pkgs.callPackage ./packages/tart-runner.nix { }).setup;
-                  ghApi = (pkgs.callPackage ./packages/tart-runner.nix { }).api;
-                  ghPoll = (pkgs.callPackage ./packages/tart-runner.nix { }).poll;
+                  inherit (tartRunner) controller setup;
+                  ghApi = tartRunner.api;
+                  ghPoll = tartRunner.poll;
                   assertionsOk = if lib.all (a: a.assertion) eval.config.assertions then "1" else "0";
                 }
                 ''
@@ -487,7 +491,18 @@
                 '';
           };
 
-          formatter = pkgs.nixfmt-rfc-style;
+          # treefmt owns `nix fmt` and supplies its own `checks.treefmt` gate, so CI
+          # needs no hand-rolled formatting step: `nix flake check` runs the formatter
+          # from THIS flake's lock instead of the runner's ambient registry. Same tool
+          # set as every other fleet flake — a bare `formatter = pkgs.nixfmt-rfc-style`
+          # (what this was) formats but never LINTS, so statix anti-patterns and
+          # deadnix's unused bindings went uncaught here while siblings caught them.
+          treefmt = {
+            projectRootFile = "flake.nix";
+            programs.nixfmt.enable = true;
+            programs.deadnix.enable = true;
+            programs.statix.enable = true;
+          };
         };
     };
 }
