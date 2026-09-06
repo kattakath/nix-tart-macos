@@ -11,6 +11,13 @@
 # LaunchAgents run in the GUI login user's session — a Virtualization.framework
 # requirement (guest boot needs the user's unlocked data-protection keychain),
 # so there is deliberately no daemon-user mode.
+#
+# Which is also why nix-darwin's own services.github-runners is declined, not
+# missed: the option exists (modules/services/github-runner/options.nix:10,
+# with `ephemeral` at :209), but it renders a launchd DAEMON under a
+# `_github-runner` service user (service.nix:77 and :172) running the runner
+# straight ON THE HOST — no VM-per-job dimension at all, which is the whole of
+# what this module is for.
 {
   config,
   lib,
