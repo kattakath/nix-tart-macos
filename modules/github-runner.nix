@@ -62,8 +62,40 @@ let
           type = lib.types.str;
           description = "Path to the GitHub App PEM at runtime (agenix output, etc.).";
         };
+        # LABEL VOCABULARY — capability, not identity.
+        #
+        # `--no-default-labels` is passed (packages/tart-runner.nix), so GitHub
+        # adds NOTHING server-side: this list is the runner's entire label set,
+        # and the first three re-declare what GitHub would otherwise have
+        # assigned on its own ({self-hosted, macOS, ARM64} — matching is
+        # case-insensitive, so `arm64` here answers a job asking for `ARM64`).
+        #
+        # `tart` is the toolchain discriminator: a job that lands here runs in a
+        # stock Cirrus guest, NOT on the host, so it sees no nix, no cachix and
+        # no host postgres. The counterpart bare-metal lane
+        # (nix-config `services.macosGithubRunner`) carries `nix` for the same
+        # reason. Keep BOTH sides positive: a set that is merely "the other one
+        # minus `tart`" is unmatchable, because GitHub has no negative selector
+        # and this list is a strict superset of the bare-metal one.
+        #
+        # `name` is per-instance and stays for now. It is a MATCHING key today,
+        # so removing it is a NARROW, not a cleanup — scope (org/repo) already
+        # partitions these, and no workflow should be keying on it.
+        #
+        # FLIP ORDER for any narrowing change (dropping a label here, or
+        # editing a consumer's `runs-on:`): labels are additive and free, but
+        # `runs-on:` is a hard AND-match, so a not-yet-live label queues every
+        # job forever instead of failing.
+        #   1. WIDEN here first, activate, and confirm the label is live on an
+        #      ONLINE runner for that exact scope
+        #      (`gh api /orgs/<org>/actions/runners`). An ephemeral Tart
+        #      registration only exists while a guest holds a slot, so "not
+        #      listed" can mean "idle", not "misconfigured".
+        #   2. FLIP consumers ONE repo at a time, watching the first run pick up
+        #      a runner rather than queue.
+        #   3. NARROW last, once nothing references the old label.
         labels = lib.mkOption {
-          type = lib.types.listOf lib.types.str;
+          type = lib.types.nonEmptyListOf lib.types.str;
           default = [
             "self-hosted"
             "macOS"
@@ -71,7 +103,12 @@ let
             "tart"
             name
           ];
-          description = "Registered with --no-default-labels; instance name included by default.";
+          description = ''
+            The runner's COMPLETE label set — registered with
+            `--no-default-labels`, so nothing is added server-side. Carries the
+            fleet's canonical vocabulary ({self-hosted, macOS, arm64} + the
+            `tart` toolchain discriminator) plus the instance name.
+          '';
         };
         runnerGroup = lib.mkOption {
           type = lib.types.str;

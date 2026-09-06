@@ -16,6 +16,22 @@
 # config.toml is rendered AT AGENT START into ~/.config/nix-gitlab-runner/
 # (0700/0600 via umask), so the token never touches the world-readable store.
 # Registration itself (minting the glrt- token) stays a one-time manual act.
+#
+# TAGS ARE NOT DECLARABLE FROM NIX — deliberately absent, not forgotten. Under
+# the glrt- authentication-token model a runner's tag_list is server-side
+# state, fixed at registration and edited only through the API/UI
+# (`PUT /api/v4/runners/:id --data "tag_list=macos,arm64"`); config.toml has no
+# tags key to render, and the legacy `--tag-list` belonged to the dead
+# REGISTRATION_TOKEN flow. So tags are manual for exactly the same reason
+# minting the token is — same one-time act, same place to do it. GitHub's lanes
+# (tart.githubRunners, and nix-config's services.macosGithubRunner) are the
+# opposite: labels ARE declared in Nix and applied at every re-registration.
+#
+# GitLab matches a job's `tags:` as a subset of the runner's tag_list, same
+# AND-semantics as GitHub's `runs-on:` — so the same flip order applies, and
+# the API edit takes the place of step 1's activation: widen the runner's
+# tag_list first, confirm it on the ONLINE runner (`glab api /runners/:id`),
+# flip consumers one project at a time, narrow last.
 {
   config,
   lib,
