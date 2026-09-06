@@ -125,12 +125,22 @@ let
       # hold the loop forever; 4h is generous for a warm link and tight for a
       # cold one, so raise TR_PULL_TIMEOUT rather than assume it is enough.
       TR_PULL_TIMEOUT="''${TR_PULL_TIMEOUT:-14400}"
+      # Slot-wait ceiling (tart-slots.sh). GitHub is the FORGIVING lane: with no
+      # runner registered a queued job simply waits at the forge — free, for up
+      # to 24h — so a timeout here costs nothing but a loop iteration, and the
+      # loop is worth returning to (it reaps orphans and re-checks base/pin).
+      # 30 min is long enough to ride out a sibling lane's whole job and short
+      # enough that a wedged slot marker cannot pin this controller for a day.
+      # The GitLab lane deliberately uses a far smaller value; see
+      # packages/gitlab-tart.nix.
+      TR_SLOT_WAIT="''${TR_SLOT_WAIT:-1800}"
 
       log() { echo "[$(date -u +%FT%TZ)] [$TR_NAME] $*" >&2; }
 
       # --- slot semaphore: the shared library (tart-slots.sh) — one protocol
-      # with the GitLab shims. Blocks until a slot frees; GitHub simply queues
-      # jobs while no runner is registered.
+      # with the GitLab shims. Waits at most TR_SLOT_WAIT for a slot and then
+      # REFUSES (non-zero); on this lane a refusal is cheap, because GitHub
+      # simply keeps the job queued while no runner is registered.
       # shellcheck disable=SC1091
       source ${slotsLib}
 
@@ -238,9 +248,17 @@ let
             # The pin boots a throwaway guest, so it must respect Apple's
             # host-wide 2-guest cap — the pull must not.
             log "host-key pin $TR_KNOWN_HOSTS absent — re-pinning in a slot (one guest boot, <=''${TR_BOOT_TIMEOUT}s)"
-            slot_acquire_pid
-            tart-runner-setup pin || log "re-pin FAILED ($TR_OCI_IMAGE@$TR_OCI_DIGEST)"
-            slot_release
+            if slot_acquire_pid; then
+              tart-runner-setup pin || log "re-pin FAILED ($TR_OCI_IMAGE@$TR_OCI_DIGEST)"
+              slot_release
+            else
+              # No slot, so no pin: `tart-runner-setup pin` boots a REAL
+              # throwaway guest, and running it unslotted would be a third
+              # macOS guest. Nothing is registered at the forge at this point,
+              # so deferring costs nothing — fall through to the backoff below
+              # and try again on the next cycle.
+              log "SLOT-WAIT-TIMEOUT after ''${TR_SLOT_WAIT}s — re-pin deferred, all $TR_SLOTS_MAX guest slots busy"
+            fi
           fi
           if base_present && pin_present; then
             mark_ready
@@ -264,7 +282,8 @@ let
         uuid=$(uuidgen | tr '[:upper:]' '[:lower:]')
         vm="run-$TR_NAME-$uuid"
         # Tear down only what was actually created. The RETURN trap fires on
-        # EVERY early return (mint failure, empty token), and an unconditional
+        # EVERY early return (mint failure, empty token, slot-wait timeout —
+        # none of which hold a slot, so slot_release is a no-op), and an unconditional
         # `tart delete` on a never-cloned VM emits a bogus "possible leaked
         # clone" — the red herring that sat next to the real 2026-09-05 cause
         # in the log.
@@ -283,13 +302,33 @@ let
         }
         trap cleanup RETURN
 
-        slot_acquire_pid
-        log "slot acquired; minting registration token"
+        # ORDER IS LOAD-BEARING: mint FIRST, slot SECOND. The mint is three
+        # HTTPS round-trips (App key -> JWT -> installation token ->
+        # registration token); it boots no guest and creates nothing at the
+        # forge, so it costs nothing against Apple's 2-guest budget. The old
+        # order took one of only TWO slots before it knew a token could even be
+        # had, and then held it across the mint AND across the `sleep 30` of a
+        # mint failure — a guest slot denied to the other CI lane while no work
+        # existed. A runner is created only by `./config.sh` inside the guest,
+        # far below; until then this function is free to walk away.
         local token
         token=$(tart-runner-mint) || { log "mint failed"; sleep 30; return 1; }
         [ -n "$token" ] && [ "$token" != "null" ] || { log "empty token"; sleep 30; return 1; }
 
-        log "clone $TR_BASE_IMAGE -> $vm"
+        # Work is now known to be startable — only NOW take a guest slot.
+        if ! slot_acquire_pid; then
+          # GitHub lane on timeout: register NOTHING. The queued job stays
+          # queued at GitHub (free, up to 24h) and the unused registration
+          # token just expires; the trap below releases nothing because nothing
+          # was acquired. Registering a runner we cannot boot a guest for would
+          # be strictly worse — GitHub would dispatch the job to a runner that
+          # never picks it up, and the job would burn its own timeout instead
+          # of waiting for real capacity.
+          log "SLOT-WAIT-TIMEOUT after ''${TR_SLOT_WAIT}s: all $TR_SLOTS_MAX guest slots busy — no runner registered, job stays queued at GitHub"
+          return 1
+        fi
+
+        log "slot acquired; clone $TR_BASE_IMAGE -> $vm"
         "$TART" clone "$TR_BASE_IMAGE" "$vm" || return 1
         cloned=1
         "$TART" set "$vm" --cpu "$TR_CPU" --memory "$TR_MEMORY_MB" || return 1

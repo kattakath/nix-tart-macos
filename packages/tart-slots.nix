@@ -20,10 +20,12 @@
 #   vm   — a specific VM name (e.g. gitlab-<job-id>) whose spawning process
 #          exits before the VM does (GitLab's prepare stage); stale when
 #          `tart list` no longer shows the VM.
-# Callers: slot_acquire_pid | slot_acquire_vm <name> (both BLOCK until a slot
-# frees; GitHub queues jobs and GitLab holds prepare meanwhile), then
-# slot_release, or slot_release_vm <name> from a different process (cleanup).
+# Callers: slot_acquire_pid | slot_acquire_vm <name> (both wait for a slot, but
+# for at most TR_SLOT_WAIT seconds — see _slot_acquire — and return NON-ZERO on
+# expiry), then slot_release, or slot_release_vm <name> from a different
+# process (cleanup).
 # Requires: TR_SLOTS_DIR TR_SLOTS_MAX TART (tart binary path) in scope.
+# Optional: TR_SLOT_WAIT (seconds; each lane sets its own default).
 { writeText }:
 writeText "tart-slots.sh" ''
   _slot_stale() {
@@ -55,8 +57,28 @@ writeText "tart-slots.sh" ''
     return 0
   }
 
+  # BOUNDED wait — this loop used to be `while :; … sleep 10`, i.e. block
+  # forever. Measured 2026-09-06 on the GitLab lane: the shim that acquires runs
+  # in the executor's *prepare* stage, which the coordinator starts only AFTER
+  # it has already assigned the job — so every second spent here is charged to
+  # that job's own timeout while GitLab believes the job is running. An
+  # unbounded wait therefore converts "the host's two guests are busy" into
+  # silent starvation instead of a visible refusal, and the operator sees a job
+  # that timed out with no logs rather than one that was told "no capacity".
+  #
+  # TR_SLOT_WAIT is the ceiling in seconds. It has NO single right value, so
+  # each lane sets its own default at the call site (GitHub waits long — its
+  # jobs sit queued at the forge for free; GitLab fails fast so the job returns
+  # to `pending`); 900 here is only the floor-level fallback for a caller that
+  # sets nothing. 0 means "one pass, never sleep".
+  #
+  # On expiry: returns 1 with SLOT_DIR UNTOUCHED. No slot is held, so the caller
+  # must neither slot_release nor go on to boot a guest — doing so would exceed
+  # Apple's hard 2-guest cap and fail inside Virtualization.framework mid-job,
+  # which is the exact failure this whole file exists to prevent.
   _slot_acquire() { # $1 = marker filename, $2 = marker content
     mkdir -p "$TR_SLOTS_DIR"
+    local waited=0 limit="''${TR_SLOT_WAIT:-900}" step=10
     while :; do
       local i d
       for i in $(seq 1 "$TR_SLOTS_MAX"); do
@@ -71,7 +93,15 @@ writeText "tart-slots.sh" ''
           _slot_discard "$d"
         fi
       done
-      sleep 10
+      if [ "$waited" -ge "$limit" ]; then
+        echo "tart-slots: SLOT-WAIT-TIMEOUT after ''${waited}s (all $TR_SLOTS_MAX guest slots busy)" >&2
+        return 1
+      fi
+      # Never overshoot the ceiling: the last nap is the remainder, so a caller
+      # asking for 5s does not actually wait 10.
+      [ $((limit - waited)) -ge "$step" ] || step=$((limit - waited))
+      sleep "$step"
+      waited=$((waited + step))
     done
   }
 

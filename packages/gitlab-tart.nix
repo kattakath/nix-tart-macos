@@ -9,7 +9,12 @@
 #   nix-gitlab-tart-prepare  acquire a slot keyed vm=gitlab-<CI_JOB_ID>
 #                            (the executor's own deterministic VM name:
 #                            internal/gitlab/env.go `fmt.Sprintf("gitlab-%s",
-#                            e.JobID)`), then exec the real prepare.
+#                            e.JobID)`), then exec the real prepare. The wait is
+#                            BOUNDED (TR_SLOT_WAIT, default 120s): prepare runs
+#                            after the coordinator has already assigned the job,
+#                            so on expiry it exits SYSTEM_FAILURE_EXIT_CODE —
+#                            job back to `pending` — instead of quietly eating
+#                            the job's own timeout.
 #   nix-gitlab-tart-run      passthrough.
 #   nix-gitlab-tart-cleanup  real cleanup first (deletes the VM), then release
 #                            the slot by vm name — gitlab-runner ALWAYS runs
@@ -75,6 +80,13 @@ let
     # packages/tart-vm.nix pattern), never a /Users/<name> literal.
     export TR_SLOTS_DIR="''${TR_SLOTS_DIR:-$HOME/.local/state/tart-runner/slots}"
     export TR_SLOTS_MAX="''${TR_SLOTS_MAX:-2}"
+    # Slot-wait ceiling (tart-slots.sh). This lane is the UNFORGIVING one: the
+    # prepare stage runs only AFTER the coordinator has assigned the job, so the
+    # wait is billed to that job's own timeout while GitLab believes it is
+    # running. Wait ~2 min for a guest that is merely about to free up, then
+    # refuse — versus the GitHub controller's 30 min, where a queued job costs
+    # nothing (packages/tart-runner.nix).
+    export TR_SLOT_WAIT="''${TR_SLOT_WAIT:-120}"
     # shellcheck disable=SC1091
     source ${slotsLib}
   '';
@@ -93,8 +105,20 @@ let
   prepare = mkShim "prepare" ''
     ${slotEnvDefaults}
     vm="gitlab-''${CUSTOM_ENV_CI_JOB_ID:?}"
-    echo "nix-gitlab-tart-prepare: waiting for a VM slot ($vm)" >&2
-    slot_acquire_vm "$vm"
+    echo "nix-gitlab-tart-prepare: waiting for a VM slot ($vm), <=''${TR_SLOT_WAIT}s" >&2
+    if ! slot_acquire_vm "$vm"; then
+      # FAIL FAST, and as a SYSTEM failure — not a build failure. The
+      # custom-executor protocol reserves $SYSTEM_FAILURE_EXIT_CODE (exported
+      # by gitlab-runner itself) for "the environment could not host this job";
+      # exiting with it returns the job to `pending` to be picked up again,
+      # whereas any other non-zero exit marks the user's pipeline red for a
+      # capacity problem that is not theirs. Off-the-shelf mechanism: the
+      # runner already models exactly this case, so nothing custom is needed.
+      # Blocking instead (the old behaviour) burned the job's own timeout while
+      # the coordinator believed it was running — silent starvation.
+      echo "nix-gitlab-tart-prepare: SLOT-WAIT-TIMEOUT after ''${TR_SLOT_WAIT}s — no VM slot for $vm; returning the job to pending" >&2
+      exit "''${SYSTEM_FAILURE_EXIT_CODE:-1}"
+    fi
     echo "nix-gitlab-tart-prepare: slot acquired" >&2
     exec ${exe} prepare "$@"
   '';

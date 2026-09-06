@@ -308,6 +308,16 @@ two-macOS-guest budget with the `tart.githubRunners.*` GitHub controllers —
 deterministic `gitlab-<CI_JOB_ID>` VM name, since its prepare process exits
 while the VM lives on).
 
+The wait for a slot is **bounded** (`TR_SLOT_WAIT`), and the two lanes want
+opposite defaults because a queued job costs them different things:
+
+| Lane | Default | On expiry |
+|---|---|---|
+| GitHub (`tart-runner-controller`) | 1800s | Registers **no** runner — the job stays queued at GitHub (free, up to 24h) and the controller loops. |
+| GitLab (`nix-gitlab-tart-prepare`) | 120s | Exits `$SYSTEM_FAILURE_EXIT_CODE` — the job returns to `pending` instead of burning its own timeout while the coordinator thinks it is running. |
+
+Both log a greppable `SLOT-WAIT-TIMEOUT`.
+
 Two ways to wire gitlab-runner to it:
 
 **Declarative** — `darwinModules.gitlab-runner` runs gitlab-runner itself as a
