@@ -28,6 +28,9 @@
         darwinModules.tart = import ./modules/darwin.nix;
         # Ephemeral GitHub Actions runners in disposable VMs (tart.runners.*).
         darwinModules.runner = import ./modules/tart-runner.nix;
+        # Declarative gitlab-runner wired to the Tart custom executor
+        # (tart.gitlabRunner.*); token stays a runtime file, never in-store.
+        darwinModules.gitlab-runner = import ./modules/gitlab-runner.nix;
       };
 
       perSystem =
@@ -201,6 +204,58 @@
                   esac
                   [ "$slotsOk" = "1" ] || { echo "default runnerSlots failed its own assertion" >&2; exit 1; }
                   test -x "$arg0"
+                  touch "$out"
+                '';
+            gitlab-runner-module =
+              let
+                inherit (inputs.nixpkgs) lib;
+                eval = lib.evalModules {
+                  modules = [
+                    ./modules/gitlab-runner.nix
+                    {
+                      options.environment.systemPackages = lib.mkOption {
+                        type = lib.types.listOf lib.types.package;
+                        default = [ ];
+                      };
+                      options.launchd.user.agents = lib.mkOption {
+                        type = lib.types.attrsOf lib.types.anything;
+                        default = { };
+                      };
+                      options.assertions = lib.mkOption {
+                        type = lib.types.listOf lib.types.anything;
+                        default = [ ];
+                      };
+                    }
+                    {
+                      _module.args.pkgs = pkgs;
+                      tart.gitlabRunner = {
+                        enable = true;
+                        runnerName = "smoke";
+                        tokenFile = "/run/agenix/gitlab-runner-token";
+                      };
+                    }
+                  ];
+                };
+                agent = eval.config.launchd.user.agents.gitlab-runner.serviceConfig;
+              in
+              pkgs.runCommand "gitlab-runner-module-eval"
+                {
+                  arg0 = builtins.head agent.ProgramArguments;
+                }
+                ''
+                  # arg0 rule asserted mechanically; the wrapper's shellcheck
+                  # already gated it at build (writeShellApplication).
+                  case "$(basename "$arg0")" in
+                    nix-gitlab-runner) : ;;
+                    *) echo "arg0 rule violated: $arg0" >&2; exit 1 ;;
+                  esac
+                  test -x "$arg0"
+                  # The rendered-config template must reference all four shims.
+                  for stage in config prepare run cleanup; do
+                    grep -q "nix-gitlab-tart-$stage" "$arg0" || {
+                      echo "wrapper lost the $stage shim reference" >&2; exit 1;
+                    }
+                  done
                   touch "$out"
                 '';
           };
