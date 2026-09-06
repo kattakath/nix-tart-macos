@@ -3,6 +3,17 @@
 # controllers, the GitLab executor shims). Apple's Virtualization framework
 # refuses a third concurrent macOS guest; this is where that budget is shared.
 #
+# Why not `/usr/bin/lockf` — the off-the-shelf answer, and the one that DELETED
+# this exact mkdir + pid-file + `kill -0` + stale-reclaim shape over in
+# nix-media-cli (packages/media-queue.nix:396-405: "THE LOCK IS THE KERNEL'S,
+# NOT OURS … that makes a stale lock structurally impossible"). lockf takes a
+# `flock(2)`, whose entire guarantee is that the kernel drops the lock when the
+# holder dies — and the `vm` marker below must OUTLIVE its acquiring process,
+# because GitLab's prepare stage exits while the guest it booted lives on.
+# Nor does splitting it help: flock for `pid` + mkdir for `vm` would be two
+# separate accountings of ONE hard 2-guest budget, which is the single thing
+# this file exists to prevent.
+#
 # Protocol: TR_SLOTS_DIR holds slot-N dirs, created with atomic mkdir. Each
 # slot carries ONE ownership marker:
 #   pid  — a long-lived controller process; stale when the pid is dead.
