@@ -28,11 +28,26 @@
 # Optional: TR_SLOT_WAIT (seconds; each lane sets its own default).
 { writeText }:
 writeText "tart-slots.sh" ''
+  # A `vm` marker names a guest that does not exist YET. GitLab's prepare
+  # stage takes the slot and only then runs `tart clone`, so between
+  # slot_acquire_vm and the clone completing there is a window where
+  # `tart list` legitimately does not know the name — and judging the slot
+  # stale in that window lets a concurrent acquirer steal it, over-subscribing
+  # the very 2-guest budget this file exists to enforce. A `vm` slot younger
+  # than TR_SLOT_VM_GRACE is therefore treated as LIVE regardless of tart,
+  # which is the fail-closed direction: at worst one slot is held a little
+  # longer than needed. The `pid` path needs no such grace — a pid is alive or
+  # it is not, with no window in between.
   _slot_stale() {
     if [ -f "$1/vm" ]; then
-      local vm
+      local vm now born
       vm=$(cat "$1/vm" 2>/dev/null || true)
       [ -n "$vm" ] || return 0
+      now=$(date +%s)
+      born=$(/usr/bin/stat -f %m "$1/vm" 2>/dev/null || echo 0)
+      if [ "$born" -gt 0 ] && [ "$((now - born))" -lt "''${TR_SLOT_VM_GRACE:-120}" ]; then
+        return 1
+      fi
       "$TART" list --quiet 2>/dev/null | grep -qx "$vm" && return 1 || return 0
     fi
     local pid

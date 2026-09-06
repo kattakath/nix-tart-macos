@@ -109,14 +109,22 @@ let
     if ! slot_acquire_vm "$vm"; then
       # FAIL FAST, and as a SYSTEM failure — not a build failure. The
       # custom-executor protocol reserves $SYSTEM_FAILURE_EXIT_CODE (exported
-      # by gitlab-runner itself) for "the environment could not host this job";
-      # exiting with it returns the job to `pending` to be picked up again,
-      # whereas any other non-zero exit marks the user's pipeline red for a
-      # capacity problem that is not theirs. Off-the-shelf mechanism: the
-      # runner already models exactly this case, so nothing custom is needed.
-      # Blocking instead (the old behaviour) burned the job's own timeout while
-      # the coordinator believed it was running — silent starvation.
-      echo "nix-gitlab-tart-prepare: SLOT-WAIT-TIMEOUT after ''${TR_SLOT_WAIT}s — no VM slot for $vm; returning the job to pending" >&2
+      # by gitlab-runner itself) for "the environment could not host this job",
+      # so the failure is attributed to the runner rather than marking the
+      # user's pipeline red for a capacity problem that is not theirs.
+      # Off-the-shelf mechanism: the runner already models exactly this case.
+      #
+      # WHAT IT DOES *NOT* DO — an earlier revision of this comment claimed it
+      # "returns the job to pending". It does not. gitlab-runner RETRIES the
+      # prepare stage a bounded number of times and then FAILS the job as
+      # `runner_system_failure`. So this exit converts a silent stall into a
+      # visible, correctly-attributed failure — an improvement, but not a free
+      # requeue. A consuming project that wants a genuine retry must ask for
+      # one: `retry: { when: runner_system_failure }`. TR_SLOT_WAIT is set low
+      # for this lane precisely because failing fast and visibly beats blocking
+      # (the old behaviour) and burning the job's own timeout while the
+      # coordinator believed it was running.
+      echo "nix-gitlab-tart-prepare: SLOT-WAIT-TIMEOUT after ''${TR_SLOT_WAIT}s — no VM slot for $vm; failing prepare as runner_system_failure" >&2
       exit "''${SYSTEM_FAILURE_EXIT_CODE:-1}"
     fi
     echo "nix-gitlab-tart-prepare: slot acquired" >&2

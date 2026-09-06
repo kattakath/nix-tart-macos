@@ -187,12 +187,21 @@ let
           ;;
 
         runner-busy)
+          # THREE outcomes, not two. Collapsing "the probe failed" into "idle"
+          # is how a transient curl error (a 5xx, a dropped connection, a
+          # momentarily expired token) gets read as "this runner has no job"
+          # and the watchdog tears down a guest that is mid-build. The caller
+          # must be able to tell "GitHub says idle" from "GitHub did not say".
+          #   0 = busy · 3 = confirmed idle · 4 = probe failed, UNKNOWN
           id="''${2:?usage: tart-runner-api runner-busy <id>}"
           tok=$(read_token)
-          busy=$(gh_curl "$tok" "https://api.github.com/$(scope_path)/actions/runners/$id" \
-            | jq -r '.busy // false' || true)
-          if [ "$busy" = "true" ]; then exit 0; fi
-          exit 3
+          resp=$(gh_curl "$tok" "https://api.github.com/$(scope_path)/actions/runners/$id") || exit 4
+          busy=$(printf '%s' "$resp" | jq -r '.busy // empty') || exit 4
+          case "$busy" in
+            true) exit 0 ;;
+            false) exit 3 ;;
+            *) exit 4 ;;
+          esac
           ;;
 
         runner-delete)
@@ -399,6 +408,12 @@ let
       # timer can never pre-empt a legitimate job. It exists to catch a wedged
       # guest, not to bound job runtime.
       TR_JOB_TIMEOUT="''${TR_JOB_TIMEOUT:-21600}"
+      # Ceiling for the linear backoff applied after consecutive idle guests.
+      # 15 min matches the slot-wait cap; long enough that a permanently
+      # undispatchable queued job costs one guest per quarter hour instead of
+      # one per poll, short enough that real work is not left waiting.
+      TR_IDLE_BACKOFF_MAX="''${TR_IDLE_BACKOFF_MAX:-900}"
+      idle_streak=0
 
       log() { echo "[$(date -u +%FT%TZ)] [$TR_NAME] $*" >&2; }
 
@@ -580,8 +595,25 @@ let
             kill "$run_pid" >/dev/null 2>&1 || true
             wait "$run_pid" 2>/dev/null || true
           fi
+          # RETRY UNTIL GONE, exactly as the pin guest already does (a74b787).
+          # `tart stop` returns BEFORE the guest has actually gone and `tart
+          # delete` REFUSES a running VM, so a single attempt loses the race
+          # and the `|| log` swallowed it. That is not a stray disk clone: a
+          # still-RUNNING guest consumes one of Apple's two concurrent macOS
+          # guests while this function is about to release the slot, so the
+          # semaphore counts a slot free that physically is not — and the next
+          # lane's boot fails inside Virtualization.framework instead of
+          # queueing. Two guests were hand-reaped on 2026-09-06 for this.
+          # The retry deliberately runs BEFORE slot_release: holding the slot
+          # while the guest still exists is the honest accounting.
           if [ "$cloned" = 1 ]; then
-            "$TART" delete "$vm" >/dev/null 2>&1 || log "WARNING: delete $vm failed — possible leaked clone"
+            gone=0
+            for _ in $(seq 1 30); do
+              "$TART" list --quiet 2>/dev/null | grep -qx "$vm" || { gone=1; break; }
+              "$TART" delete "$vm" >/dev/null 2>&1 && { gone=1; break; }
+              sleep 2
+            done
+            [ "$gone" = 1 ] || log "WARNING: $vm still present after 60s — it holds one of Apple's two guests; delete it by hand"
           fi
           # A JIT registration OUTLIVES the guest it was minted for: GitHub
           # only garbage-collects an unconnected ephemeral runner after a day.
@@ -679,16 +711,33 @@ let
         # (Runner.Listener exits, the ssh session closes), or a timer fires.
         # `busy` on the runner itself is the dispatch signal — no log scraping,
         # and it stops being polled the moment work starts.
-        local waited_job=0
+        local waited_job=0 probe_unknown=0
         while kill -0 "$ssh_pid" 2>/dev/null; do
-          if [ "$started" = 0 ] \
-            && printf '%s' "$INSTALL_TOKEN" | tart-runner-api runner-busy "$runner_id" >/dev/null 2>&1; then
-            started=1
-            log "runner $runner_id picked up a job"
+          if [ "$started" = 0 ]; then
+            printf '%s' "$INSTALL_TOKEN" | tart-runner-api runner-busy "$runner_id" >/dev/null 2>&1
+            case $? in
+              0) started=1; log "runner $runner_id picked up a job" ;;
+              3) probe_unknown=0 ;;
+              # 4 = the probe itself failed; that is NOT evidence of idleness.
+              # Freeze the grace clock instead of counting toward a teardown,
+              # so a GitHub blip cannot kill a guest that is mid-build. A
+              # sustained outage is surfaced rather than acted on.
+              *)
+                probe_unknown=$((probe_unknown + 1))
+                [ "$probe_unknown" -ne 6 ] || log "WARNING: runner-busy has failed 6x for $runner_id — idle-grace clock is paused, not counting toward teardown"
+                waited_job=$((waited_job - 10))
+                ;;
+            esac
           fi
           if [ "$started" = 0 ] && [ "$waited_job" -ge "$TR_JOB_GRACE" ]; then
             log "IDLE-GUEST-TIMEOUT: runner $runner_id got no job within ''${TR_JOB_GRACE}s (a sibling lane most likely won it) — releasing the guest and its slot"
-            return 1
+            # Distinct from a plain failure so the caller can back off. A job
+            # that matches these labels but is never dispatched HERE stays
+            # queued, so the very next poll sees it again — without a backoff
+            # that is an unbroken clone/boot/idle/destroy cycle holding a guest
+            # slot continuously, which is the pre-2026-09-06 waste in a new
+            # costume.
+            return 4
           fi
           if [ "$waited_job" -ge "$TR_JOB_TIMEOUT" ]; then
             log "JOB-TIMEOUT after ''${TR_JOB_TIMEOUT}s — releasing the guest and its slot"
@@ -726,8 +775,28 @@ let
         printf '%s' "$INSTALL_TOKEN" | tart-runner-poll
         prc=$?
         case "$prc" in
-          0) run_one_job ;;
-          3) : ;;
+          0)
+            run_one_job
+            jrc=$?
+            # Reap EVERY cycle, not just at startup. cleanup() retries hard,
+            # but if it still loses (host asleep mid-teardown, tart wedged) the
+            # guest survives carrying no slot marker — invisible to
+            # _slot_stale, and permanently one of Apple's two guests. Startup-
+            # only reaping meant that leak lasted until the LaunchAgent
+            # restarted, which for a KeepAlive agent can be days. Cheap: one
+            # `tart list` against this instance's own prefixes.
+            reap_own_orphans
+            if [ "$jrc" = 4 ]; then
+              idle_streak=$((idle_streak + 1))
+              idle_backoff=$((TR_POLL_INTERVAL * idle_streak))
+              [ "$idle_backoff" -le "$TR_IDLE_BACKOFF_MAX" ] || idle_backoff="$TR_IDLE_BACKOFF_MAX"
+              log "backing off ''${idle_backoff}s after $idle_streak idle guest(s) — a matching job is queued but is not being dispatched to this lane"
+              sleep "$idle_backoff"
+            else
+              idle_streak=0
+            fi
+            ;;
+          3) idle_streak=0 ;;
           *) log "queued-work poll failed (rc=$prc)" ;;
         esac
         sleep "$TR_POLL_INTERVAL"

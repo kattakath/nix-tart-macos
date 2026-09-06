@@ -452,11 +452,22 @@
                   # A guest is booted ONLY on the poll saying there is work.
                   grep -q 'tart-runner-poll' "$ctl" \
                     || fail "controller has no host-side queued-work poll"
-                  grep -Eq '^[[:space:]]*0\) run_one_job ;;' "$ctl" \
-                    || fail "run_one_job is no longer gated on the queued-work poll result"
-                  if grep -Eq '^[[:space:]]*run_one_job[[:space:]]*$' "$ctl"; then
-                    fail "run_one_job is still called unconditionally — an idle lane would boot a guest"
-                  fi
+                  # Assert the INVARIANT, not one line's shape: every CALL of
+                  # run_one_job must sit inside the poll's `0)` arm. An earlier
+                  # version pinned the literal `0) run_one_job ;;`, which broke
+                  # the moment that arm legitimately grew a backoff — a test
+                  # that fails on correct refactors teaches people to delete it.
+                  grep -Eq '^[[:space:]]*0\)' "$ctl" \
+                    || fail "controller lost the queued-work poll's result case arm"
+                  awk '
+                    /^[[:space:]]*0\)/ { inarm = 1 }
+                    inarm && /^[[:space:]]*;;/ { inarm = 0 }
+                    /run_one_job/ && !/run_one_job\(\)/ && !/^[[:space:]]*#/ {
+                      if (!inarm) bad++
+                    }
+                    END { exit (bad ? 1 : 0) }
+                  ' "$ctl" \
+                    || fail "run_one_job is called outside the poll's 0) arm — an idle lane would boot a guest"
                   # And a runner is created at the forge only AFTER a slot is
                   # held: minting first would leave a registered runner behind
                   # on a slot-wait timeout, and GitHub would dispatch to it.

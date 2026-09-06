@@ -357,7 +357,7 @@ opposite defaults because a queued job costs them different things:
 | Lane | Default | On expiry |
 |---|---|---|
 | GitHub (`tart-runner-controller`) | 1800s | Registers **no** runner — the job stays queued at GitHub (free, up to 24h) and the controller loops. |
-| GitLab (`nix-gitlab-tart-prepare`) | 120s | Exits `$SYSTEM_FAILURE_EXIT_CODE` — the job returns to `pending` instead of burning its own timeout while the coordinator thinks it is running. |
+| GitLab (`nix-gitlab-tart-prepare`) | 120s | Exits `$SYSTEM_FAILURE_EXIT_CODE`, so the failure is attributed to the runner, not the pipeline. gitlab-runner retries `prepare` a bounded number of times and then fails the job as `runner_system_failure` — it does **not** requeue it. Add `retry: { when: runner_system_failure }` to a job that should genuinely retry. Still far better than blocking, which burned the job's own timeout while the coordinator thought it was running. |
 
 Both log a greppable `SLOT-WAIT-TIMEOUT`.
 
