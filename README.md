@@ -1,3 +1,21 @@
+> [!IMPORTANT]
+> ## Archived 2026-09-12 — this flake now lives inside `kattakath/nix-config`
+>
+> The code moved to **`modules/features/tart-vms/`** in
+> [kattakath/nix-config](https://github.com/kattakath/nix-config), as a *capsule*: a
+> directory that may not reach outside itself, enforced by the repo's `ast-grep` gate rather
+> than by convention.
+>
+> **Why:** maintaining seven satellite flakes cost seven CI pipelines, seven merge queues and a
+> lock-bump dance for every cross-cutting change — for repos with 2 GitHub stars between them.
+> The rationale, the four competing architectures that were scored, the adversarial review that
+> found three blocking defects, and an honest list of what the collapse gives up are all in
+> [`docs/monoflake-capsule-adr.md`](https://github.com/kattakath/nix-config/blob/main/docs/monoflake-capsule-adr.md).
+>
+> **This repository is read-only.** Its history is preserved here and is the only place it
+> exists — the absorption was a plain copy, not a `git subtree`, so `git blame` in nix-config
+> stops at the collapse commit and continues here.
+
 # nix-tart-vms
 
 [![CI](https://github.com/kattakath/nix-tart-vms/actions/workflows/ci.yml/badge.svg)](https://github.com/kattakath/nix-tart-vms/actions/workflows/ci.yml)
